@@ -306,3 +306,191 @@ def engineer_features(df: pd.DataFrame,
     return df2
 
 
+
+# =========================
+# v2 Feature Engineering
+# =========================
+
+from tqdm.auto import tqdm  # type: ignore
+
+# tqdm for apply (노트북/스크립트 모두에서 무해)
+try:
+    tqdm.pandas()  # noqa: E701  # progress_apply 활성화
+except Exception:
+    pass
+
+
+def _seq_mean(series: pd.Series) -> pd.Series:
+    return series.fillna("").progress_apply(
+        lambda x: np.fromstring(str(x), sep=",").mean() if str(x) else np.nan
+    )
+
+
+def _seq_std(series: pd.Series) -> pd.Series:
+    return series.fillna("").progress_apply(
+        lambda x: np.fromstring(str(x), sep=",").std() if str(x) else np.nan
+    )
+
+
+def _seq_rate(series: pd.Series, target: str = "1") -> pd.Series:
+    # 시퀀스에서 target 비율 계산
+    def _count_rate(x: str) -> float:
+        x = str(x)
+        if not x:
+            return np.nan
+        parts = x.split(",")
+        denom = len(parts) if len(parts) > 0 else np.nan
+        if denom == 0 or np.isnan(denom):
+            return np.nan
+        return parts.count(target) / denom
+
+    return series.fillna("").progress_apply(_count_rate)
+
+
+def _masked_mean_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_val: float) -> pd.Series:
+    """조건 시퀀스(cond_series)에서 mask_val 위치의 val_series 평균"""
+    cond_df = cond_series.fillna("").str.split(",", expand=True).replace("", np.nan)
+    val_df = val_series.fillna("").str.split(",", expand=True).replace("", np.nan)
+    try:
+        cond_arr = cond_df.to_numpy(dtype=float)
+    except Exception:
+        cond_arr = cond_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+    try:
+        val_arr = val_df.to_numpy(dtype=float)
+    except Exception:
+        val_arr = val_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+
+    mask = (cond_arr == mask_val)
+    with np.errstate(invalid="ignore"):
+        sums = np.nansum(np.where(mask, val_arr, np.nan), axis=1)
+        counts = np.sum(mask, axis=1)
+        out = sums / np.where(counts == 0, np.nan, counts)
+    return pd.Series(out, index=cond_series.index)
+
+
+def preprocess_A_v2(train_A: pd.DataFrame) -> pd.DataFrame:
+    """사용자 정의 A 데이터 피처 엔지니어링(v2 1차안).
+    - 쉼표 시퀀스 기반 요약(비율/평균/표준편차)
+    - 과제별 주요 파생
+    - 시퀀스 원본은 제거
+    """
+    df = train_A.copy()
+
+    # 0) 결측치가 너무 많은 행은 제거 (요구사항에 맞춤)
+    df = df.dropna().reset_index(drop=True)
+
+    # 1) 불필요한 열 제거 (존재할 때만)
+    drop_cols = [
+        "A1-1", "A1-2",
+        "A3-1", "A3-2", "A3-3", "A3-4", "A3-5",
+        "A4-1", "A4-2", "A4-3",
+    ]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+
+    feats = pd.DataFrame(index=df.index)
+
+    # ---- A1 ----
+    if "A1-3" in df.columns:
+        feats["A1_resp_rate"] = _seq_rate(df["A1-3"], "0")  # 0=반응함
+    if "A1-4" in df.columns:
+        feats["A1_rt_mean"] = _seq_mean(df["A1-4"])  
+        feats["A1_rt_std"] = _seq_std(df["A1-4"])   
+
+    # ---- A2 ----
+    if "A2-3" in df.columns:
+        feats["A2_resp_rate"] = _seq_rate(df["A2-3"], "0")
+    if "A2-4" in df.columns:
+        feats["A2_rt_mean"] = _seq_mean(df["A2-4"])  
+        feats["A2_rt_std"] = _seq_std(df["A2-4"])   
+
+    # ---- A3 ----
+    if "A3-6" in df.columns:
+        feats["A3_resp_rate"] = _seq_rate(df["A3-6"], "0")
+    if "A3-7" in df.columns:
+        feats["A3_rt_mean"] = _seq_mean(df["A3-7"])  
+        feats["A3_rt_std"] = _seq_std(df["A3-7"])   
+
+    # ---- A4 ----
+    if "A4-4" in df.columns:
+        feats["A4_resp_rate"] = _seq_rate(df["A4-4"], "0")
+    if "A4-3" in df.columns:
+        feats["A4_acc_rate"] = _seq_rate(df["A4-3"], "1")
+    if "A4-5" in df.columns:
+        feats["A4_rt_mean"] = _seq_mean(df["A4-5"])  
+        feats["A4_rt_std"] = _seq_std(df["A4-5"])   
+    # stroop diff: (cond=2) - (cond=1) on A4-5
+    if set(["A4-1", "A4-5"]).issubset(df.columns):
+        feats["A4_stroop_diff"] = _masked_mean_from_csv_series(df["A4-1"], df["A4-5"], 2) - \
+                                    _masked_mean_from_csv_series(df["A4-1"], df["A4-5"], 1)
+
+    # ---- A5 ----
+    if "A5-3" in df.columns:
+        feats["A5_resp_rate"] = _seq_rate(df["A5-3"], "0")
+    if "A5-2" in df.columns:
+        feats["A5_acc_rate"] = _seq_rate(df["A5-2"], "1")
+
+    # ---- A6~A9 (집계형 수치 그대로 사용) ----
+    for col in [
+        "A6-1", "A7-1", "A8-1", "A8-2",
+        "A9-1", "A9-2", "A9-3", "A9-4", "A9-5",
+    ]:
+        if col in df.columns:
+            feats[col] = df[col]
+
+    # 시퀀스 원본 제거 후 결합
+    seq_cols = [c for c in df.columns if "-" in c and c not in feats.columns]
+    out = pd.concat([df.drop(columns=seq_cols, errors="ignore"), feats], axis=1)
+    # 알림
+    print("✅ A 피처 엔지니어링(v2) 완료:", out.shape)
+    return out
+
+
+def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
+    """사용자 정의 B 데이터 피처 엔지니어링(v2 1차안)."""
+    df = train_B.copy()
+    df = df.dropna().reset_index(drop=True)
+
+    feats = pd.DataFrame(index=df.index)
+
+    # ---- B1 ----
+    if "B1-1" in df.columns:
+        feats["B1_acc_rate"] = _seq_rate(df["B1-1"], "1")
+    if "B1-2" in df.columns:
+        feats["B1_rt_mean"] = _seq_mean(df["B1-2"])  
+        feats["B1_rt_std"] = _seq_std(df["B1-2"])   
+
+    # ---- B2 ----
+    if "B2-1" in df.columns:
+        feats["B2_acc_rate"] = _seq_rate(df["B2-1"], "1")
+    if "B2-2" in df.columns:
+        feats["B2_rt_mean"] = _seq_mean(df["B2-2"])  
+        feats["B2_rt_std"] = _seq_std(df["B2-2"])   
+
+    # ---- B3~B5 ----
+    for k in ["B3", "B4", "B5"]:
+        acc_col, rt_col = f"{k}-1", f"{k}-2"
+        if acc_col in df.columns:
+            feats[f"{k}_acc_rate"] = _seq_rate(df[acc_col], "1")
+        if rt_col in df.columns:
+            feats[f"{k}_rt_mean"] = _seq_mean(df[rt_col])
+            feats[f"{k}_rt_std"] = _seq_std(df[rt_col])
+
+    # ---- B6~B8 ----
+    for k in ["B6", "B7", "B8"]:
+        if k in df.columns:
+            feats[f"{k}_acc_rate"] = _seq_rate(df[k], "1")
+
+    # ---- B9~B10 (집계형 count 그대로 사용) ----
+    for col in [
+        "B9-1", "B9-2", "B9-3", "B9-4", "B9-5",
+        "B10-1", "B10-2", "B10-3", "B10-4", "B10-5", "B10-6",
+    ]:
+        if col in df.columns:
+            feats[col] = df[col]
+
+    out = pd.concat([
+        df.drop(columns=[c for c in df.columns if "-" in c and c not in feats.columns], errors="ignore"),
+        feats,
+    ], axis=1)
+    print("✅ B 피처 엔지니어링(v2) 완료:", out.shape)
+    return out
