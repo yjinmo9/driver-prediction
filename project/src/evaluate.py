@@ -12,9 +12,10 @@ def compute_brier(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     return metrics.brier_score_loss(y_true, y_prob)
 
 
-# 한국어 주석: ECE(Expected Calibration Error) 계산
+# 한국어 주석: ECE(Expected Calibration Error) 계산 (표준 정의)
+# 각 bin에서 acc=mean(y_true), conf=mean(y_prob)
+# 가중합 sum_n (n/N) * |acc - conf|
 def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> float:
-    # 한국어 주석: 구간(bin)을 나누어 예측 확률의 보정 정도를 측정
     y_true = y_true.astype(float)
     y_prob = y_prob.astype(float)
     bins = np.linspace(0.0, 1.0, n_bins + 1)
@@ -27,7 +28,7 @@ def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> flo
             continue
         bin_true = y_true[mask]
         bin_prob = y_prob[mask]
-        acc = np.mean((bin_prob >= 0.5).astype(float) == bin_true)
+        acc = np.mean(bin_true)
         conf = np.mean(bin_prob)
         ece += (np.sum(mask) / total) * abs(acc - conf)
     return float(ece)

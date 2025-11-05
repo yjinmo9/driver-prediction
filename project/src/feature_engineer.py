@@ -368,6 +368,23 @@ def _masked_mean_from_csv_series(cond_series: pd.Series, val_series: pd.Series, 
     return pd.Series(out, index=cond_series.index)
 
 
+# ---- Public wrappers (원본 함수명 유지) ----
+def seq_mean(series: pd.Series) -> pd.Series:
+    return _seq_mean(series)
+
+
+def seq_std(series: pd.Series) -> pd.Series:
+    return _seq_std(series)
+
+
+def seq_rate(series: pd.Series, target: str = "1") -> pd.Series:
+    return _seq_rate(series, target=target)
+
+
+def masked_mean_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_val: float) -> pd.Series:
+    return _masked_mean_from_csv_series(cond_series, val_series, mask_val)
+
+
 def preprocess_A_v2(train_A: pd.DataFrame) -> pd.DataFrame:
     """사용자 정의 A 데이터 피처 엔지니어링(v2 1차안).
     - 쉼표 시퀀스 기반 요약(비율/평균/표준편차)
@@ -438,8 +455,8 @@ def preprocess_A_v2(train_A: pd.DataFrame) -> pd.DataFrame:
             feats[col] = df[col]
 
     # 시퀀스 원본 제거 후 결합
-    seq_cols = [c for c in df.columns if "-" in c and c not in feats.columns]
-    out = pd.concat([df.drop(columns=seq_cols, errors="ignore"), feats], axis=1)
+    base = df.drop(columns=[c for c in df.columns if c in feats.columns], errors="ignore")
+    out = pd.concat([base, feats], axis=1)
     # 알림
     print("✅ A 피처 엔지니어링(v2) 완료:", out.shape)
     return out
@@ -489,7 +506,7 @@ def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
             feats[col] = df[col]
 
     out = pd.concat([
-        df.drop(columns=[c for c in df.columns if "-" in c and c not in feats.columns], errors="ignore"),
+        df.drop(columns=[c for c in df.columns if c in feats.columns], errors="ignore"),
         feats,
     ], axis=1)
     print("✅ B 피처 엔지니어링(v2) 완료:", out.shape)
