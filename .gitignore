@@ -1,0 +1,18 @@
+# data (keep folder, ignore contents)
+project/data/**
+!project/data/.gitkeep
+
+# notebooks checkpoints
+*.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# python caches/env
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,32 @@
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+# macOS(Apple Silicon)에서는 tensorflow-macos 사용 (2.17.0 미제공 → 2.16.2 사용)
+tensorflow-macos==2.16.2; platform_system == "Darwin" and platform_machine == "arm64"
+# 선택: Metal 가속 (가능한 경우)
+tensorflow-metal==1.1.0; platform_system == "Darwin" and platform_machine == "arm64"
+# 리눅스/그 외는 tensorflow-cpu 유지
+tensorflow-cpu==2.17.0; platform_system != "Darwin"
+pillow==10.4.0
+PyMuPDF==1.24.11
+pandas==2.2.2
+numpy==1.26.4
+faiss-cpu==1.8.0
+langchain==0.3.7
+langchain-community==0.3.7
+ultralytics==8.3.170
+scikit-learn==1.5.2
+accelerate==0.34.2
+transformers==4.46.3
+python-pptx==1.0.2
+pdfminer.six==20231228
+opencv-python==4.10.0.84
+pdf2image==1.17.0
+sentencepiece==0.2.0
+regex==2024.9.11
+tqdm==4.66.5
+loguru==0.7.2
+pyyaml==6.0.2
+rich==13.9.4
+albumentations==1.4.20
+
