@@ -148,7 +148,10 @@ def fit_combined_model(
     final_score = compute_final_score(auc, brier, ece)
     print(f"[ALL] Holdout AUC={auc:.5f}, Brier={brier:.5f}, ECE={ece:.5f}, Final={final_score:.5f}")
 
-    return preproc, ensemble
+    # 한국어 주석: 학습 데이터의 클래스 비율 저장 (리밸런싱용)
+    train_prior = float(np.mean(y_tr))
+    
+    return preproc, ensemble, train_prior
 
 
 def main() -> None:
@@ -177,12 +180,14 @@ def main() -> None:
     
     # 한국어 주석: 통합 학습 경로
     print("[ALL] training path...")
-    preproc_all, ensemble_all = fit_combined_model(train_idx, A_train_feat, B_train_feat, "Label")
+    preproc_all, ensemble_all, train_prior = fit_combined_model(train_idx, A_train_feat, B_train_feat, "Label")
 
     # 한국어 주석: 단일 모델 저장 (통합)
     joblib.dump(ensemble_all, MODEL_FILE)
     joblib.dump(preproc_all, os.path.join(MODEL_DIR, "preproc_all.pkl"))
-    print("[완료] 통합 모델이 저장되었습니다.")
+    # 한국어 주석: 학습 데이터의 클래스 비율 저장 (리밸런싱용)
+    joblib.dump(train_prior, os.path.join(MODEL_DIR, "train_prior.pkl"))
+    print(f"[완료] 통합 모델이 저장되었습니다. (Train prior: {train_prior:.4f})")
 
 
 if __name__ == "__main__":

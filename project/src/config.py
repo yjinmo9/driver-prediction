@@ -63,4 +63,44 @@ BASE_HGB_PARAMS = {
     "class_weight": "balanced",  # 한국어 주석: 불균형 데이터 가중치
 }
 
+# 한국어 주석: LightGBM 기본 파라미터
+BASE_LIGHTGBM_PARAMS = {
+    "learning_rate": 0.06,
+    "n_estimators": 100,
+    "max_depth": -1,  # 제한 없음
+    "num_leaves": 63,
+    "min_child_samples": 20,
+    "reg_alpha": 0.0,
+    "reg_lambda": 0.0,
+    "early_stopping_rounds": 25,
+    "class_weight": "balanced",
+    "verbose": -1,  # 출력 억제
+}
+
+# 한국어 주석: CatBoost 기본 파라미터
+BASE_CATBOOST_PARAMS = {
+    "learning_rate": 0.06,
+    "iterations": 100,
+    "depth": 6,
+    "l2_leaf_reg": 0.0,
+    "early_stopping_rounds": 25,
+    "class_weights": "balanced",
+    "verbose": False,  # 출력 억제
+    "random_seed": RANDOM_SEED,
+}
+
+# 한국어 주석: XGBoost 기본 파라미터
+BASE_XGBOOST_PARAMS = {
+    "learning_rate": 0.06,
+    "n_estimators": 100,
+    "max_depth": 6,
+    "min_child_weight": 1,
+    "reg_alpha": 0.0,
+    "reg_lambda": 0.0,
+    "early_stopping_rounds": 25,
+    "scale_pos_weight": 1,  # balanced로 자동 계산
+    "random_state": RANDOM_SEED,
+    "eval_metric": "logloss",
+}
+
 

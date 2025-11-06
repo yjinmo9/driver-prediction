@@ -27,3 +27,4 @@ echo "[done] competition venv ready. Activate with: source .venv/bin/activate"
 
 
 
+
