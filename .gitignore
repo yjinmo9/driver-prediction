@@ -19,3 +19,6 @@ __pycache__/
 
 # ignore model binaries
 project/model/*.pkl
+
+# ignore local notes and config files
+project/notes/

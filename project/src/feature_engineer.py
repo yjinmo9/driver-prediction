@@ -288,6 +288,9 @@ def engineer_features(df: pd.DataFrame,
     """EDA 결과를 바탕으로 통합 피처 엔지니어링"""
     df2 = df.copy()
     
+    # ✅ 결측치 포함 행은 전부 제거
+    df2 = df2.dropna().reset_index(drop=True)
+    
     if add_age_time:
         df2 = add_age_time_features(df2)
     
