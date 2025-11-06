@@ -25,6 +25,8 @@ from .config import (
     BASE_XGBOOST_PARAMS,
     CALIB_METHOD,
     CALIBRATION_CV,
+    MODEL_FILE,
+    PREPROC_ALL_FILE,
 )
 
 
@@ -204,5 +206,12 @@ def load_models() -> tuple:
     ensemble_B = joblib.load(B_MODEL_FILE)
     preproc_B = joblib.load(B_PREPROC_FILE)
     return preproc_A, ensemble_A, preproc_B, ensemble_B
+
+
+# 한국어 주석: 통합 모델/전처리 로딩 (train.py 경로)
+def load_combined_model() -> tuple:
+    ensemble = joblib.load(MODEL_FILE)
+    preproc = joblib.load(PREPROC_ALL_FILE)
+    return preproc, ensemble
 
 

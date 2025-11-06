@@ -26,6 +26,7 @@ DEFAULT_DROP_COLUMNS = [
 MODEL_FILE = os.path.join(MODEL_DIR, "model.pkl")
 FEATURES_FILE = os.path.join(MODEL_DIR, "features.json")
 DTYPES_FILE = os.path.join(MODEL_DIR, "dtypes.json")
+PREPROC_ALL_FILE = os.path.join(MODEL_DIR, "preproc_all.pkl")
 
 # 한국어 주석: A/B 분리 모델 저장 경로 (참고 코드 방식)
 A_MODEL_FILE = os.path.join(MODEL_DIR, "model_A.pkl")

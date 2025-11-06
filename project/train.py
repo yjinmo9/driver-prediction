@@ -12,6 +12,7 @@ from src.config import (
     MODEL_DIR,
     RANDOM_SEED,
     VALID_SIZE,
+    OUTPUT_DIR,
 )
 from src.data_utils import read_index_files, read_feature_files
 from src.feature_engineer import (
@@ -20,7 +21,12 @@ from src.feature_engineer import (
     build_preprocessor,
     add_rowwise_features,
 )
-from src.model_utils import build_and_train_ensemble, save_model_artifacts
+from src.model_utils import (
+    build_and_train_ensemble,
+    save_model_artifacts,
+    TemperatureScaler,
+    CalibratedWithTemperature,
+)
 from src.feature_engineer import preprocess_A_v2, preprocess_B_v2
 from src.evaluate import compute_ece, compute_final_score
 from src.config import MODEL_FILE
@@ -84,6 +90,12 @@ def fit_single_model(
     
     # 한국어 주석: 검증 데이터로 평가
     try:
+        # 기본 캘리브레이션(Platt/Isotonic) 후 확률
+        val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
+        # 온도 스케일링으로 ECE/Brier 추가 보정 (밸리데이션 기반)
+        temp = TemperatureScaler()
+        temp.fit(y_val, val_proba)
+        ensemble = CalibratedWithTemperature(ensemble, temp)
         val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
         auc = roc_auc_score(y_val, val_proba)
         brier = brier_score_loss(y_val, val_proba)
@@ -141,6 +153,11 @@ def fit_combined_model(
 
     ensemble = build_and_train_ensemble(X_tr_t, y_tr)
 
+    # 온도 스케일링 보정
+    val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
+    temp = TemperatureScaler()
+    temp.fit(y_val, val_proba)
+    ensemble = CalibratedWithTemperature(ensemble, temp)
     val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
     auc = roc_auc_score(y_val, val_proba)
     brier = brier_score_loss(y_val, val_proba)
@@ -160,6 +177,7 @@ def main() -> None:
     
     # 한국어 주석: 디렉터리 준비
     os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     # 한국어 주석: 인덱스 파일 로드
     train_idx, test_idx = read_index_files()

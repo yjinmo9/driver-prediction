@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.config import DATA_DIR, OUTPUT_DIR, SUBMISSION_FILE, MODEL_DIR, MODEL_FILE
 from src.data_utils import read_index_files, read_feature_files
-from src.model_utils import load_models
+from src.model_utils import load_models, load_combined_model
 from src.feature_engineer import split_numeric_categorical, build_preprocessor, add_rowwise_features
 from src.evaluate import rebalance_probabilities
 import joblib
