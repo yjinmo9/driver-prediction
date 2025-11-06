@@ -8,21 +8,14 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn import __version__ as sklver
 
-import lightgbm as lgb
-import catboost as cb
-import xgboost as xgb
-
 from .config import (
     A_MODEL_FILE,
     B_MODEL_FILE,
     A_PREPROC_FILE,
     B_PREPROC_FILE,
     META_FILE,
-    RANDOM_SEED,
+    ENSEMBLE_SEEDS,
     BASE_HGB_PARAMS,
-    BASE_LIGHTGBM_PARAMS,
-    BASE_CATBOOST_PARAMS,
-    BASE_XGBOOST_PARAMS,
     CALIB_METHOD,
     CALIBRATION_CV,
     MODEL_FILE,
@@ -67,106 +60,64 @@ class AvgProbaEnsemble:
         return np.mean(probs, axis=0)
 
 
-# 한국어 주석: LightGBM 모델 생성
-def create_lightgbm_model(seed: int = RANDOM_SEED) -> lgb.LGBMClassifier:
-    params = BASE_LIGHTGBM_PARAMS.copy()
-    params["random_state"] = seed
-    params["objective"] = "binary"
-    params["metric"] = "binary_logloss"
-    # Calibration과 호환되도록 early_stopping_rounds는 None으로 설정 (fit에서 직접 처리)
-    params.pop("early_stopping_rounds", None)
-    return lgb.LGBMClassifier(**params)
+# 한국어 주석: 바이너리 확률 Temperature Scaling
+class TemperatureScaler:
+    def __init__(self, init_T: float = 1.0):
+        self.T = float(init_T)
+
+    @staticmethod
+    def _logit(p: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+        p = np.clip(p, eps, 1.0 - eps)
+        return np.log(p) - np.log(1.0 - p)
+
+    @staticmethod
+    def _sigmoid(z: np.ndarray) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-z))
+
+    def fit(self, y_true: np.ndarray, p_prob: np.ndarray) -> None:
+        y = y_true.astype(float)
+        z = self._logit(p_prob)
+        # 간단한 선형 탐색으로 NLL 최소 T 선택
+        candidates = np.linspace(0.5, 5.0, 10)
+        best_T, best_nll = self.T, np.inf
+        for t in candidates:
+            p = self._sigmoid(z / t)
+            nll = -np.mean(y * np.log(np.clip(p, 1e-12, 1)) + (1 - y) * np.log(np.clip(1 - p, 1e-12, 1)))
+            if nll < best_nll:
+                best_nll, best_T = nll, float(t)
+        self.T = best_T
+
+    def transform(self, p_prob: np.ndarray) -> np.ndarray:
+        z = self._logit(p_prob)
+        p = self._sigmoid(z / max(self.T, 1e-6))
+        return np.clip(p, 1e-7, 1 - 1e-7)
 
 
-# 한국어 주석: CatBoost 모델 생성
-def create_catboost_model(seed: int = RANDOM_SEED, class_weights: dict = None) -> cb.CatBoostClassifier:
-    params = BASE_CATBOOST_PARAMS.copy()
-    params["random_seed"] = seed
-    params["loss_function"] = "Logloss"
-    params["task_type"] = "CPU"
-    # Calibration과 호환되도록 early_stopping_rounds는 fit에서 직접 처리
-    params.pop("early_stopping_rounds", None)
-    # class_weights가 문자열이면 None으로 설정 (나중에 fit에서 계산)
-    if "class_weights" in params and params["class_weights"] == "balanced":
-        params.pop("class_weights", None)
-    if class_weights is not None:
-        params["class_weights"] = class_weights
-    return cb.CatBoostClassifier(**params)
+class CalibratedWithTemperature:
+    def __init__(self, base_ensemble: AvgProbaEnsemble, temp_scaler: TemperatureScaler | None):
+        self.base_ensemble = base_ensemble
+        self.temp_scaler = temp_scaler
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        p = self.base_ensemble.predict_proba(X)
+        if self.temp_scaler is None:
+            return p
+        p1 = p[:, 1]
+        p1_t = self.temp_scaler.transform(p1)
+        p0_t = 1.0 - p1_t
+        return np.stack([p0_t, p1_t], axis=1)
 
 
-# 한국어 주석: XGBoost 모델 생성
-def create_xgboost_model(seed: int = RANDOM_SEED) -> xgb.XGBClassifier:
-    params = BASE_XGBOOST_PARAMS.copy()
-    params["random_state"] = seed
-    params["objective"] = "binary:logistic"
-    # Calibration과 호환되도록 early_stopping_rounds는 fit에서 직접 처리
-    params.pop("early_stopping_rounds", None)
-    return xgb.XGBClassifier(**params)
-
-
-# 한국어 주석: 삼중 앙상블 모델 생성 및 캘리브레이션 (LightGBM + CatBoost + XGBoost)
+# 한국어 주석: HGB 다중 시드 앙상블 + 캘리브레이션
 def build_and_train_ensemble(X_train: np.ndarray, y_train: np.ndarray) -> Any:
-    # 한국어 주석: LightGBM, CatBoost, XGBoost 각각 학습 및 캘리브레이션
-    members = []
-    
-    # validation set을 위한 분할 (early stopping용)
-    from sklearn.model_selection import train_test_split
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train, y_train, test_size=0.12, random_state=RANDOM_SEED, stratify=y_train
-    )
-    
-    # 1. LightGBM
-    lgb_model = create_lightgbm_model(seed=RANDOM_SEED)
-    # Early stopping을 위한 validation set 사용
-    lgb_model.fit(
-        X_tr, y_tr,
-        eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(stopping_rounds=25, verbose=False)]
-    )
-    # Calibration을 위해 모델 복사 (early stopping 콜백 제거)
-    from sklearn.base import clone
-    lgb_for_calib = clone(lgb_model)
-    lgb_for_calib.set_params(callbacks=None)  # 콜백 제거
-    lgb_calib = create_calibrated_model(lgb_for_calib)
-    lgb_calib.fit(X_train, y_train)
-    members.append(lgb_calib)
-    
-    # 2. CatBoost
-    # CatBoost는 class_weights를 딕셔너리로 계산
-    from sklearn.utils.class_weight import compute_class_weight
-    classes = np.unique(y_train)
-    cat_class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
-    cat_weight_dict = dict(zip(classes, cat_class_weights))
-    cat_model = create_catboost_model(seed=RANDOM_SEED, class_weights=cat_weight_dict)
-    cat_model.fit(
-        X_tr, y_tr,
-        eval_set=(X_val, y_val),
-        use_best_model=True
-    )
-    cat_calib = create_calibrated_model(cat_model)
-    cat_calib.fit(X_train, y_train)
-    members.append(cat_calib)
-    
-    # 3. XGBoost
-    xgb_model = create_xgboost_model(seed=RANDOM_SEED)
-    # XGBoost는 불균형 데이터를 위해 scale_pos_weight 계산
-    from sklearn.utils.class_weight import compute_class_weight
-    classes = np.unique(y_train)
-    class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
-    weight_dict = dict(zip(classes, class_weights))
-    xgb_model.set_params(scale_pos_weight=weight_dict[1] / weight_dict[0])
-    xgb_model.fit(
-        X_tr, y_tr,
-        eval_set=[(X_val, y_val)],
-        verbose=False
-    )
-    xgb_calib = create_calibrated_model(xgb_model)
-    xgb_calib.fit(X_train, y_train)
-    members.append(xgb_calib)
-    
-    # 한국어 주석: 삼중 앙상블로 감싸서 반환
-    ensemble = AvgProbaEnsemble(members)
-    return ensemble
+    members: List[Any] = []
+    for sd in ENSEMBLE_SEEDS:
+        base = create_base_estimator(seed=sd)
+        base.fit(X_train, y_train)
+        calib = create_calibrated_model(base)
+        calib.fit(X_train, y_train)
+        members.append(calib)
+    return AvgProbaEnsemble(members)
 
 
 # 한국어 주석: A/B 모델 및 전처리기 저장
@@ -187,10 +138,9 @@ def save_model_artifacts(
     
     # 한국어 주석: 메타데이터 저장
     meta = {
-        "model": "LightGBM + CatBoost + XGBoost Ensemble + IsotonicCalibration",
-        "lightgbm_params": BASE_LIGHTGBM_PARAMS,
-        "catboost_params": BASE_CATBOOST_PARAMS,
-        "xgboost_params": BASE_XGBOOST_PARAMS,
+        "model": "HistGradientBoostingClassifier x{} + {} Calibration".format(len(ENSEMBLE_SEEDS), CALIB_METHOD),
+        "hgb_params": BASE_HGB_PARAMS,
+        "ensemble_seeds": list(ENSEMBLE_SEEDS),
         "calib_method": CALIB_METHOD,
         "calib_cv": CALIBRATION_CV,
         "sklearn_version": sklver,
