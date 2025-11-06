@@ -165,7 +165,10 @@ def fit_combined_model(
     final_score = compute_final_score(auc, brier, ece)
     print(f"[ALL] Holdout AUC={auc:.5f}, Brier={brier:.5f}, ECE={ece:.5f}, Final={final_score:.5f}")
 
-    return preproc, ensemble
+    # 한국어 주석: 학습 데이터의 클래스 비율 저장 (리밸런싱용)
+    train_prior = float(np.mean(y_tr))
+    
+    return preproc, ensemble, train_prior
 
 
 def main() -> None:
@@ -193,35 +196,16 @@ def main() -> None:
     except Exception as e:
         print(f"[v2] feature engineering skipped due to error: {e}")
     
-    # 한국어 주석: 먼저 A/B 개별 학습 경로
-    print("[A] training path...")
-    preproc_A, ensemble_A = fit_single_model(
-        df_idx=train_idx[train_idx["Test"] == "A"].copy(),
-        df_feat=A_train_feat,
-        label_col="Label",
-        which="A",
-    )
+    # 한국어 주석: 통합 학습 경로
+    print("[ALL] training path...")
+    preproc_all, ensemble_all, train_prior = fit_combined_model(train_idx, A_train_feat, B_train_feat, "Label")
 
-    print("[B] training path...")
-    preproc_B, ensemble_B = fit_single_model(
-        df_idx=train_idx[train_idx["Test"] == "B"].copy(),
-        df_feat=B_train_feat,
-        label_col="Label",
-        which="B",
-    )
-
-    # 한국어 주석: A/B 모델 및 전처리 저장
-    save_model_artifacts(preproc_A, ensemble_A, preproc_B, ensemble_B)
-    print("[완료] A/B 분리 모델이 저장되었습니다.")
-
-    # 한국어 주석: 추가 파일 저장 없이 콘솔 결과만 출력하도록 유지 (A/B Holdout 로그는 위에서 출력됨)
-
-    # 한국어 주석: 필요 시 통합 모델도 추가 학습하려면 아래 주석 해제
-    # print("[ALL] training path...")
-    # preproc_all, ensemble_all = fit_combined_model(train_idx, A_train_feat, B_train_feat, "Label")
-    # joblib.dump(ensemble_all, MODEL_FILE)
-    # joblib.dump(preproc_all, os.path.join(MODEL_DIR, "preproc_all.pkl"))
-    # print("[완료] 통합 모델이 저장되었습니다.")
+    # 한국어 주석: 단일 모델 저장 (통합)
+    joblib.dump(ensemble_all, MODEL_FILE)
+    joblib.dump(preproc_all, os.path.join(MODEL_DIR, "preproc_all.pkl"))
+    # 한국어 주석: 학습 데이터의 클래스 비율 저장 (리밸런싱용)
+    joblib.dump(train_prior, os.path.join(MODEL_DIR, "train_prior.pkl"))
+    print(f"[완료] 통합 모델이 저장되었습니다. (Train prior: {train_prior:.4f})")
 
 
 if __name__ == "__main__":
