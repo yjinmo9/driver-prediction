@@ -52,16 +52,48 @@ ENSEMBLE_SEEDS = (42, 202, 777)
 
 # 한국어 주석: HistGradientBoostingClassifier 기본 파라미터 (참고 코드 방식)
 BASE_HGB_PARAMS = {
-    "learning_rate": 0.06,  # 한국어 주석: 학습률
-    "max_iter": 300,  # 한국어 주석: 최대 반복 횟수
-    "max_depth": None,  # 한국어 주석: 최대 깊이 (None = 제한 없음)
-    "max_leaf_nodes": 63,  # 한국어 주석: 최대 잎 노드 수
-    "min_samples_leaf": 20,  # 한국어 주석: 잎 노드 최소 샘플 수
-    "l2_regularization": 0.0,  # 한국어 주석: L2 정규화
-    "early_stopping": True,  # 한국어 주석: 조기 종료 활성화
-    "validation_fraction": 0.12,  # 한국어 주석: 검증용 데이터 비율
-    "n_iter_no_change": 25,  # 한국어 주석: 변화 없으면 종료
-    "class_weight": "balanced",  # 한국어 주석: 불균형 데이터 가중치
+    "learning_rate": 0.045,
+    "max_iter": 700,
+    "max_depth": None,
+    "max_leaf_nodes": 63,
+    "min_samples_leaf": 40,
+    "l2_regularization": 0.3,
+    "early_stopping": True,
+    "validation_fraction": 0.15,
+    "n_iter_no_change": 35,
+    "class_weight": "balanced",
+}
+
+# 한국어 주석: 혼합 앙상블 사용 설정
+ENABLE_LGBM = True
+ENABLE_XGB = True
+
+# 한국어 주석: LightGBM 기본 파라미터 (혼합 앙상블용)
+LGB_PARAMS = {
+    "objective": "binary",
+    "learning_rate": 0.05,
+    "n_estimators": 800,
+    "num_leaves": 63,
+    "min_data_in_leaf": 40,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "lambda_l2": 0.3,
+    "n_jobs": -1,
+}
+
+# 한국어 주석: XGBoost 기본 파라미터 (혼합 앙상블용)
+XGB_PARAMS = {
+    "objective": "binary:logistic",
+    "learning_rate": 0.05,
+    "n_estimators": 800,
+    "max_depth": 6,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "min_child_weight": 5,
+    "eval_metric": "logloss",
+    "n_jobs": -1,
+    # "tree_method": "hist",  # GPU/환경에 맞게 필요시 활성화
 }
 
 # 한국어 주석: LightGBM 기본 파라미터
