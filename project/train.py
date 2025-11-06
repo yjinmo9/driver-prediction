@@ -12,6 +12,7 @@ from src.config import (
     MODEL_DIR,
     RANDOM_SEED,
     VALID_SIZE,
+    OUTPUT_DIR,
 )
 from src.data_utils import read_index_files, read_feature_files
 from src.feature_engineer import (
@@ -20,7 +21,12 @@ from src.feature_engineer import (
     build_preprocessor,
     add_rowwise_features,
 )
-from src.model_utils import build_and_train_ensemble, save_model_artifacts
+from src.model_utils import (
+    build_and_train_ensemble,
+    save_model_artifacts,
+    TemperatureScaler,
+    CalibratedWithTemperature,
+)
 from src.feature_engineer import preprocess_A_v2, preprocess_B_v2
 from src.evaluate import compute_ece, compute_final_score
 from src.config import MODEL_FILE
@@ -84,6 +90,12 @@ def fit_single_model(
     
     # 한국어 주석: 검증 데이터로 평가
     try:
+        # 기본 캘리브레이션(Platt/Isotonic) 후 확률
+        val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
+        # 온도 스케일링으로 ECE/Brier 추가 보정 (밸리데이션 기반)
+        temp = TemperatureScaler()
+        temp.fit(y_val, val_proba)
+        ensemble = CalibratedWithTemperature(ensemble, temp)
         val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
         auc = roc_auc_score(y_val, val_proba)
         brier = brier_score_loss(y_val, val_proba)
@@ -141,6 +153,11 @@ def fit_combined_model(
 
     ensemble = build_and_train_ensemble(X_tr_t, y_tr)
 
+    # 온도 스케일링 보정
+    val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
+    temp = TemperatureScaler()
+    temp.fit(y_val, val_proba)
+    ensemble = CalibratedWithTemperature(ensemble, temp)
     val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
     auc = roc_auc_score(y_val, val_proba)
     brier = brier_score_loss(y_val, val_proba)
@@ -157,6 +174,7 @@ def main() -> None:
     
     # 한국어 주석: 디렉터리 준비
     os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     # 한국어 주석: 인덱스 파일 로드
     train_idx, test_idx = read_index_files()
@@ -175,14 +193,35 @@ def main() -> None:
     except Exception as e:
         print(f"[v2] feature engineering skipped due to error: {e}")
     
-    # 한국어 주석: 통합 학습 경로
-    print("[ALL] training path...")
-    preproc_all, ensemble_all = fit_combined_model(train_idx, A_train_feat, B_train_feat, "Label")
+    # 한국어 주석: 먼저 A/B 개별 학습 경로
+    print("[A] training path...")
+    preproc_A, ensemble_A = fit_single_model(
+        df_idx=train_idx[train_idx["Test"] == "A"].copy(),
+        df_feat=A_train_feat,
+        label_col="Label",
+        which="A",
+    )
 
-    # 한국어 주석: 단일 모델 저장 (통합)
-    joblib.dump(ensemble_all, MODEL_FILE)
-    joblib.dump(preproc_all, os.path.join(MODEL_DIR, "preproc_all.pkl"))
-    print("[완료] 통합 모델이 저장되었습니다.")
+    print("[B] training path...")
+    preproc_B, ensemble_B = fit_single_model(
+        df_idx=train_idx[train_idx["Test"] == "B"].copy(),
+        df_feat=B_train_feat,
+        label_col="Label",
+        which="B",
+    )
+
+    # 한국어 주석: A/B 모델 및 전처리 저장
+    save_model_artifacts(preproc_A, ensemble_A, preproc_B, ensemble_B)
+    print("[완료] A/B 분리 모델이 저장되었습니다.")
+
+    # 한국어 주석: 추가 파일 저장 없이 콘솔 결과만 출력하도록 유지 (A/B Holdout 로그는 위에서 출력됨)
+
+    # 한국어 주석: 필요 시 통합 모델도 추가 학습하려면 아래 주석 해제
+    # print("[ALL] training path...")
+    # preproc_all, ensemble_all = fit_combined_model(train_idx, A_train_feat, B_train_feat, "Label")
+    # joblib.dump(ensemble_all, MODEL_FILE)
+    # joblib.dump(preproc_all, os.path.join(MODEL_DIR, "preproc_all.pkl"))
+    # print("[완료] 통합 모델이 저장되었습니다.")
 
 
 if __name__ == "__main__":

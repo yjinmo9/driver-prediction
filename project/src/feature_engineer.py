@@ -371,6 +371,29 @@ def _masked_mean_from_csv_series(cond_series: pd.Series, val_series: pd.Series, 
     return pd.Series(out, index=cond_series.index)
 
 
+def _masked_mean_any_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_vals: list[float]) -> pd.Series:
+    cond_df = cond_series.fillna("").str.split(",", expand=True).replace("", np.nan)
+    val_df = val_series.fillna("").str.split(",", expand=True).replace("", np.nan)
+    try:
+        cond_arr = cond_df.to_numpy(dtype=float)
+    except Exception:
+        cond_arr = cond_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+    try:
+        val_arr = val_df.to_numpy(dtype=float)
+    except Exception:
+        val_arr = val_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+
+    mask = np.zeros_like(cond_arr, dtype=bool)
+    for mv in mask_vals:
+        with np.errstate(invalid="ignore"):
+            mask |= (cond_arr == mv)
+    with np.errstate(invalid="ignore"):
+        sums = np.nansum(np.where(mask, val_arr, np.nan), axis=1)
+        counts = np.sum(mask, axis=1)
+        out = sums / np.where(counts == 0, np.nan, counts)
+    return pd.Series(out, index=cond_series.index)
+
+
 # ---- Public wrappers (원본 함수명 유지) ----
 def seq_mean(series: pd.Series) -> pd.Series:
     return _seq_mean(series)
@@ -386,6 +409,10 @@ def seq_rate(series: pd.Series, target: str = "1") -> pd.Series:
 
 def masked_mean_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_val: float) -> pd.Series:
     return _masked_mean_from_csv_series(cond_series, val_series, mask_val)
+
+
+def masked_mean_any_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_vals: list[float]) -> pd.Series:
+    return _masked_mean_any_from_csv_series(cond_series, val_series, mask_vals)
 
 
 def preprocess_A_v2(train_A: pd.DataFrame) -> pd.DataFrame:
@@ -486,6 +513,12 @@ def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
         feats["B2_rt_mean"] = _seq_mean(df["B2-2"])  
         feats["B2_rt_std"] = _seq_std(df["B2-2"])   
 
+    # 난이도 차이: B2가 B1보다 어려움 가정
+    if set(["B1_rt_mean", "B2_rt_mean"]).issubset(feats.columns):
+        feats["B12_rt_diff"] = feats["B2_rt_mean"] - feats["B1_rt_mean"]
+    if set(["B1_acc_rate", "B2_acc_rate"]).issubset(feats.columns):
+        feats["B12_acc_diff"] = feats["B2_acc_rate"] - feats["B1_acc_rate"]
+
     # ---- B3~B5 ----
     for k in ["B3", "B4", "B5"]:
         acc_col, rt_col = f"{k}-1", f"{k}-2"
@@ -495,18 +528,52 @@ def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
             feats[f"{k}_rt_mean"] = _seq_mean(df[rt_col])
             feats[f"{k}_rt_std"] = _seq_std(df[rt_col])
 
+    # B4 난이도: B4-1에서 1,2 < 3,4,5,6 (hard)
+    if set(["B4-1", "B4-2"]).issubset(df.columns):
+        hard_mean = _masked_mean_any_from_csv_series(df["B4-1"], df["B4-2"], [3,4,5,6])
+        easy_mean = _masked_mean_any_from_csv_series(df["B4-1"], df["B4-2"], [1,2])
+        feats["B4_rt_hard_mean"] = hard_mean
+        feats["B4_rt_easy_mean"] = easy_mean
+        feats["B4_rt_hard_minus_easy"] = hard_mean - easy_mean
+        # 정답이 1 vs 3/5 가정: 비율 비교(참고용)
+        feats["B4_rate_ans1"] = _seq_rate(df["B4-1"], "1")
+        feats["B4_rate_ans3"] = _seq_rate(df["B4-1"], "3")
+        feats["B4_rate_ans5"] = _seq_rate(df["B4-1"], "5")
+        feats["B4_rate_ans35"] = feats["B4_rate_ans3"].fillna(0.0) + feats["B4_rate_ans5"].fillna(0.0)
+
     # ---- B6~B8 ----
     for k in ["B6", "B7", "B8"]:
         if k in df.columns:
             feats[f"{k}_acc_rate"] = _seq_rate(df[k], "1")
 
-    # ---- B9~B10 (집계형 count 그대로 사용) ----
-    for col in [
-        "B9-1", "B9-2", "B9-3", "B9-4", "B9-5",
-        "B10-1", "B10-2", "B10-3", "B10-4", "B10-5", "B10-6",
-    ]:
-        if col in df.columns:
-            feats[col] = df[col]
+    # B6 vs B7 난이도 차이: B7이 더 어려움 가정
+    if set(["B6_acc_rate", "B7_acc_rate"]).issubset(feats.columns):
+        feats["B76_acc_diff"] = feats["B7_acc_rate"] - feats["B6_acc_rate"]
+
+    # ---- B9/B10 그룹 ----
+    # B9: 1~4 한 묶음, 5 별도
+    b9_exist = [c for c in ["B9-1","B9-2","B9-3","B9-4"] if c in df.columns]
+    if b9_exist:
+        feats["B9_g1to4_mean"] = df[b9_exist].mean(axis=1)
+        feats["B9_g1to4_std"] = df[b9_exist].std(axis=1)
+    if "B9-5" in df.columns:
+        feats["B9_g5"] = df["B9-5"]
+
+    # B10: 1~4 한 묶음, 5~6 한 묶음 (B10이 B9보다 더 어려움)
+    b10_1to4 = [c for c in ["B10-1","B10-2","B10-3","B10-4"] if c in df.columns]
+    if b10_1to4:
+        feats["B10_g1to4_mean"] = df[b10_1to4].mean(axis=1)
+        feats["B10_g1to4_std"] = df[b10_1to4].std(axis=1)
+    b10_5to6 = [c for c in ["B10-5","B10-6"] if c in df.columns]
+    if b10_5to6:
+        feats["B10_g5to6_mean"] = df[b10_5to6].mean(axis=1)
+        feats["B10_g5to6_std"] = df[b10_5to6].std(axis=1)
+
+    # B10 vs B9 델타(난이도 차이 특징)
+    if "B10_g1to4_mean" in feats.columns and "B9_g1to4_mean" in feats.columns:
+        feats["B10minusB9_g1to4_mean"] = feats["B10_g1to4_mean"] - feats["B9_g1to4_mean"]
+    if "B10_g1to4_std" in feats.columns and "B9_g1to4_std" in feats.columns:
+        feats["B10minusB9_g1to4_std"] = feats["B10_g1to4_std"] - feats["B9_g1to4_std"]
 
     out = pd.concat([
         df.drop(columns=[c for c in df.columns if c in feats.columns], errors="ignore"),

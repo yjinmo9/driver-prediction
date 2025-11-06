@@ -18,6 +18,8 @@ from .config import (
     BASE_HGB_PARAMS,
     CALIB_METHOD,
     CALIBRATION_CV,
+    MODEL_FILE,
+    PREPROC_ALL_FILE,
 )
 
 
@@ -56,6 +58,60 @@ class AvgProbaEnsemble:
         # 한국어 주석: 각 모델의 예측 확률을 구한 후 평균
         probs = [m.predict_proba(X) for m in self.models]
         return np.mean(probs, axis=0)
+
+
+# 한국어 주석: 바이너리 확률에 대한 Temperature Scaling (로지트 스케일)
+class TemperatureScaler:
+    def __init__(self, init_T: float = 1.0):
+        self.T = float(init_T)
+
+    @staticmethod
+    def _logit(p: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+        p = np.clip(p, eps, 1.0 - eps)
+        return np.log(p) - np.log(1.0 - p)
+
+    @staticmethod
+    def _sigmoid(z: np.ndarray) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-z))
+
+    def fit(self, y_true: np.ndarray, p_prob: np.ndarray, max_iter: int = 200) -> None:
+        # 한국어 주석: NLL을 최소화하는 T를 1D 선형 탐색 + 뉴턴 근사 혼합으로 간단히 추정
+        y = y_true.astype(float)
+        z = self._logit(p_prob)
+
+        # 선형 탐색으로 초기값 개선
+        candidates = np.linspace(0.5, 5.0, 10)
+        best_T = self.T
+        best_nll = np.inf
+        for t in candidates:
+            p = self._sigmoid(z / t)
+            nll = -np.mean(y * np.log(np.clip(p, 1e-12, 1)) + (1 - y) * np.log(np.clip(1 - p, 1e-12, 1)))
+            if nll < best_nll:
+                best_nll = nll
+                best_T = float(t)
+
+        self.T = best_T
+
+    def transform(self, p_prob: np.ndarray) -> np.ndarray:
+        z = self._logit(p_prob)
+        p = self._sigmoid(z / max(self.T, 1e-6))
+        return np.clip(p, 1e-7, 1 - 1e-7)
+
+
+class CalibratedWithTemperature:
+    def __init__(self, base_ensemble: AvgProbaEnsemble, temp_scaler: TemperatureScaler | None):
+        self.base_ensemble = base_ensemble
+        self.temp_scaler = temp_scaler
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        p = self.base_ensemble.predict_proba(X)
+        if self.temp_scaler is None:
+            return p
+        # 클래스 1 확률만 온도 보정 후 2열로 재구성
+        p1 = p[:, 1]
+        p1_t = self.temp_scaler.transform(p1)
+        p0_t = 1.0 - p1_t
+        return np.stack([p0_t, p1_t], axis=1)
 
 
 # 한국어 주석: 여러 시드로 앙상블 모델 생성 및 캘리브레이션
@@ -110,5 +166,12 @@ def load_models() -> tuple:
     ensemble_B = joblib.load(B_MODEL_FILE)
     preproc_B = joblib.load(B_PREPROC_FILE)
     return preproc_A, ensemble_A, preproc_B, ensemble_B
+
+
+# 한국어 주석: 통합 모델/전처리 로딩 (train.py 경로)
+def load_combined_model() -> tuple:
+    ensemble = joblib.load(MODEL_FILE)
+    preproc = joblib.load(PREPROC_ALL_FILE)
+    return preproc, ensemble
 
 
