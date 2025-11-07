@@ -52,12 +52,12 @@ ENSEMBLE_SEEDS = (42, 202, 777)
 
 # 한국어 주석: HistGradientBoostingClassifier 기본 파라미터 (참고 코드 방식)
 BASE_HGB_PARAMS = {
-    "learning_rate": 0.04,
-    "max_iter": 1000,
+    "learning_rate": 0.035,
+    "max_iter": 1100,
     "max_depth": None,
     "max_leaf_nodes": 31,
-    "min_samples_leaf": 50,
-    "l2_regularization": 0.5,
+    "min_samples_leaf": 60,
+    "l2_regularization": 0.7,
     "early_stopping": True,
     "validation_fraction": 0.15,
     "n_iter_no_change": 50,
