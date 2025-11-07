@@ -24,9 +24,9 @@ from .config import (
 
 
 # 한국어 주석: HistGradientBoostingClassifier 생성 (참고 코드 방식)
-def create_base_estimator(seed: int = 42) -> HistGradientBoostingClassifier:
+def create_base_estimator(seed: int = 42, custom_params: dict = None) -> HistGradientBoostingClassifier:
     # 한국어 주석: config에서 정의한 HGB 파라미터를 사용하여 모델 생성
-    params = BASE_HGB_PARAMS.copy()
+    params = (custom_params or BASE_HGB_PARAMS).copy()
     params["random_state"] = seed
     return HistGradientBoostingClassifier(**params)
 
@@ -109,10 +109,10 @@ class CalibratedWithTemperature:
 
 
 # 한국어 주석: HGB 다중 시드 앙상블 + 캘리브레이션
-def build_and_train_ensemble(X_train: np.ndarray, y_train: np.ndarray) -> Any:
+def build_and_train_ensemble(X_train: np.ndarray, y_train: np.ndarray, custom_params: dict = None) -> Any:
     members: List[Any] = []
     for sd in ENSEMBLE_SEEDS:
-        base = create_base_estimator(seed=sd)
+        base = create_base_estimator(seed=sd, custom_params=custom_params)
         base.fit(X_train, y_train)
         calib = create_calibrated_model(base)
         calib.fit(X_train, y_train)
