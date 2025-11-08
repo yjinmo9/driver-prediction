@@ -195,35 +195,36 @@ def main() -> None:
         print(f"[v2] feature engineering skipped due to error: {e}")
     
     # 한국어 주석: A/B 각각 다른 파라미터로 병렬 학습
-    # 세트 B 파라미터 (A용)
-    params_B = {
-        "learning_rate": 0.038,
-        "max_iter": 950,
+    # 분석 결과 기반 최적 조정 (더 공격적 예측)
+    # A 모델: 더_공격적_3 (Final 0.16381, AUC 0.68410)
+    params_A_optimized = {
+        "learning_rate": 0.05,
+        "max_iter": 1200,
         "max_depth": None,
         "max_leaf_nodes": 31,
-        "min_samples_leaf": 55,
+        "min_samples_leaf": 30,
         "l2_regularization": 0.6,
         "early_stopping": True,
         "validation_fraction": 0.15,
         "n_iter_no_change": 45,
-        "class_weight": "balanced",
+        "class_weight": None,  # balanced 제거로 더 공격적 예측
     }
-    # 세트 D 파라미터 (B용)
-    params_D = {
-        "learning_rate": 0.035,
-        "max_iter": 1100,
+    # B 모델: 더_공격적_3 (Final 0.21703, AUC 0.58654)
+    params_B_optimized = {
+        "learning_rate": 0.05,
+        "max_iter": 1200,
         "max_depth": None,
         "max_leaf_nodes": 31,
-        "min_samples_leaf": 60,
+        "min_samples_leaf": 30,
         "l2_regularization": 0.7,
         "early_stopping": True,
         "validation_fraction": 0.15,
         "n_iter_no_change": 50,
-        "class_weight": "balanced",
+        "class_weight": None,  # balanced 제거로 더 공격적 예측
     }
     
-    print("[A] training path (세트 B 파라미터)...")
-    print("[B] training path (세트 D 파라미터)...")
+    print("[A] training path (최적 조정 파라미터: 더 공격적 예측)...")
+    print("[B] training path (최적 조정 파라미터: 더 공격적 예측)...")
     
     # 병렬 처리로 A/B 동시 학습
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -233,7 +234,7 @@ def main() -> None:
             A_train_feat,
             "Label",
             "A",
-            params_B,
+            params_A_optimized,
         )
         future_B = executor.submit(
             fit_single_model,
@@ -241,7 +242,7 @@ def main() -> None:
             B_train_feat,
             "Label",
             "B",
-            params_D,
+            params_B_optimized,
         )
         
         preproc_A, ensemble_A, y_val_A, val_proba_A = future_A.result()
@@ -258,7 +259,7 @@ def main() -> None:
     
     # 한국어 주석: A/B 모델 및 전처리 저장
     save_model_artifacts(preproc_A, ensemble_A, preproc_B, ensemble_B)
-    print("[완료] A/B 분리 모델이 저장되었습니다. (A: 세트 B 파라미터, B: 세트 D 파라미터)")
+    print("[완료] A/B 분리 모델이 저장되었습니다. (최적 조정 파라미터: 더 공격적 예측)")
 
 
 if __name__ == "__main__":
