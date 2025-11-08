@@ -294,12 +294,13 @@ def save_model_artifacts(
             "name": "A-CatBoost-7: 얕고 빠른",
         },
         "A_hgb_params": {
-            "learning_rate": 0.038,
-            "max_iter": 950,
+            "learning_rate": 0.05,
+            "max_iter": 1200,
             "max_leaf_nodes": 31,
-            "min_samples_leaf": 55,
+            "min_samples_leaf": 30,
             "l2_regularization": 0.6,
-            "name": "A-HGB Set B",
+            "class_weight": None,
+            "name": "A-HGB 더_공격적_3 (Final: 0.16381)",
         },
         "B_catboost_params": {
             "learning_rate": 0.06,
@@ -310,12 +311,13 @@ def save_model_artifacts(
             "name": "B-CatBoost-4: 더 공격적",
         },
         "B_hgb_params": {
-            "learning_rate": 0.035,
-            "max_iter": 1100,
+            "learning_rate": 0.05,
+            "max_iter": 1200,
             "max_leaf_nodes": 31,
-            "min_samples_leaf": 60,
+            "min_samples_leaf": 30,
             "l2_regularization": 0.7,
-            "name": "B-HGB Set D",
+            "class_weight": None,
+            "name": "B-HGB 더_공격적_3 (Final: 0.21703)",
         },
         "ensemble_seeds": list(ENSEMBLE_SEEDS),
         "use_temperature_scaling": True,
@@ -329,8 +331,8 @@ def save_model_artifacts(
 def main():
     print("="*60)
     print("CatBoost + HGB 조합 앙상블 최종 모델 학습")
-    print("A: CatBoost-7 + HGB Set B")
-    print("B: CatBoost-4 + HGB Set D")
+    print("A: CatBoost-7 + HGB 더_공격적_3")
+    print("B: CatBoost-4 + HGB 더_공격적_3")
     print("="*60)
     
     # 디렉터리 준비
@@ -375,32 +377,32 @@ def main():
     }
     
     # ========== HGB 파라미터 ==========
-    # A 모델: Set B 파라미터
+    # A 모델: 더_공격적_3 파라미터 (Final: 0.16381, AUC: 0.68410)
     hgb_params_A = {
-        "learning_rate": 0.038,
-        "max_iter": 950,
+        "learning_rate": 0.05,
+        "max_iter": 1200,
         "max_depth": None,
         "max_leaf_nodes": 31,
-        "min_samples_leaf": 55,
+        "min_samples_leaf": 30,
         "l2_regularization": 0.6,
         "early_stopping": True,
         "validation_fraction": 0.15,
         "n_iter_no_change": 45,
-        "class_weight": "balanced",
+        "class_weight": None,  # balanced 제거로 더 공격적 예측
     }
     
-    # B 모델: Set D 파라미터
+    # B 모델: 더_공격적_3 파라미터 (Final: 0.21703, AUC: 0.58654)
     hgb_params_B = {
-        "learning_rate": 0.035,
-        "max_iter": 1100,
+        "learning_rate": 0.05,
+        "max_iter": 1200,
         "max_depth": None,
         "max_leaf_nodes": 31,
-        "min_samples_leaf": 60,
-        "l2_regularization": 0.7,
+        "min_samples_leaf": 30,
+        "l2_regularization": 0.7,  # B만 0.7
         "early_stopping": True,
         "validation_fraction": 0.15,
-        "n_iter_no_change": 50,
-        "class_weight": "balanced",
+        "n_iter_no_change": 50,  # B만 50
+        "class_weight": None,  # balanced 제거로 더 공격적 예측
     }
     
     # 데이터 준비
