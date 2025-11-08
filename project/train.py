@@ -1,6 +1,7 @@
 import os
 import warnings
 from typing import Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,7 @@ def fit_single_model(
     df_feat: pd.DataFrame,
     label_col: str,
     which: str,
+    custom_params: dict = None,
 ) -> Tuple:
     # 한국어 주석: 인덱스와 피처를 Test_id로 병합
     key = "Test_id"
@@ -86,9 +88,9 @@ def fit_single_model(
     X_val_t = preproc.transform(X_val)
     
     # 한국어 주석: 앙상블 학습 (3개 시드로 학습 후 평균)
-    ensemble = build_and_train_ensemble(X_tr_t, y_tr)
+    ensemble = build_and_train_ensemble(X_tr_t, y_tr, custom_params=custom_params)
     
-    # 한국어 주석: 검증 데이터로 평가
+    # 한국어 주석: 검증 데이터로 평가 및 온도 스케일링
     try:
         # 기본 캘리브레이션(Platt/Isotonic) 후 확률
         val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
@@ -97,15 +99,11 @@ def fit_single_model(
         temp.fit(y_val, val_proba)
         ensemble = CalibratedWithTemperature(ensemble, temp)
         val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
-        auc = roc_auc_score(y_val, val_proba)
-        brier = brier_score_loss(y_val, val_proba)
-        ece = compute_ece(y_val, val_proba, n_bins=15)
-        final_score = compute_final_score(auc, brier, ece)
-        print(f"[{which}] Holdout AUC={auc:.5f}, Brier={brier:.5f}, ECE={ece:.5f}, Final={final_score:.5f}")
     except Exception as e:
-        print(f"[{which}] validation logging skipped: {e}")
+        print(f"[{which}] validation processing skipped: {e}")
+        val_proba = np.clip(ensemble.predict_proba(X_val_t)[:, 1], 1e-7, 1-1e-7)
     
-    return preproc, ensemble
+    return preproc, ensemble, y_val, val_proba
 
 
 # 한국어 주석: A+B 통합 데이터로 하나의 모델 학습
@@ -196,26 +194,71 @@ def main() -> None:
     except Exception as e:
         print(f"[v2] feature engineering skipped due to error: {e}")
     
-    # 한국어 주석: A/B 개별 학습 경로
-    print("[A] training path...")
-    preproc_A, ensemble_A = fit_single_model(
-        df_idx=train_idx[train_idx["Test"] == "A"].copy(),
-        df_feat=A_train_feat,
-        label_col="Label",
-        which="A",
-    )
-
-    print("[B] training path...")
-    preproc_B, ensemble_B = fit_single_model(
-        df_idx=train_idx[train_idx["Test"] == "B"].copy(),
-        df_feat=B_train_feat,
-        label_col="Label",
-        which="B",
-    )
-
+    # 한국어 주석: A/B 각각 다른 파라미터로 병렬 학습
+    # 세트 B 파라미터 (A용)
+    params_B = {
+        "learning_rate": 0.038,
+        "max_iter": 950,
+        "max_depth": None,
+        "max_leaf_nodes": 31,
+        "min_samples_leaf": 55,
+        "l2_regularization": 0.6,
+        "early_stopping": True,
+        "validation_fraction": 0.15,
+        "n_iter_no_change": 45,
+        "class_weight": "balanced",
+    }
+    # 세트 D 파라미터 (B용)
+    params_D = {
+        "learning_rate": 0.035,
+        "max_iter": 1100,
+        "max_depth": None,
+        "max_leaf_nodes": 31,
+        "min_samples_leaf": 60,
+        "l2_regularization": 0.7,
+        "early_stopping": True,
+        "validation_fraction": 0.15,
+        "n_iter_no_change": 50,
+        "class_weight": "balanced",
+    }
+    
+    print("[A] training path (세트 B 파라미터)...")
+    print("[B] training path (세트 D 파라미터)...")
+    
+    # 병렬 처리로 A/B 동시 학습
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_A = executor.submit(
+            fit_single_model,
+            train_idx[train_idx["Test"] == "A"].copy(),
+            A_train_feat,
+            "Label",
+            "A",
+            params_B,
+        )
+        future_B = executor.submit(
+            fit_single_model,
+            train_idx[train_idx["Test"] == "B"].copy(),
+            B_train_feat,
+            "Label",
+            "B",
+            params_D,
+        )
+        
+        preproc_A, ensemble_A, y_val_A, val_proba_A = future_A.result()
+        preproc_B, ensemble_B, y_val_B, val_proba_B = future_B.result()
+    
+    # 한국어 주석: 전체 종합 점수 계산 (A+B 합쳐서)
+    y_val_all = np.concatenate([y_val_A, y_val_B])
+    val_proba_all = np.concatenate([val_proba_A, val_proba_B])
+    auc_all = roc_auc_score(y_val_all, val_proba_all)
+    brier_all = brier_score_loss(y_val_all, val_proba_all)
+    ece_all = compute_ece(y_val_all, val_proba_all, n_bins=15)
+    final_all = compute_final_score(auc_all, brier_all, ece_all)
+    print(f"[ALL] Holdout AUC={auc_all:.5f}, Brier={brier_all:.5f}, ECE={ece_all:.5f}, Final={final_all:.5f}")
+    
     # 한국어 주석: A/B 모델 및 전처리 저장
     save_model_artifacts(preproc_A, ensemble_A, preproc_B, ensemble_B)
-    print("[완료] A/B 분리 모델이 저장되었습니다.")
+    print("[완료] A/B 분리 모델이 저장되었습니다. (A: 세트 B 파라미터, B: 세트 D 파라미터)")
 
 
 if __name__ == "__main__":
