@@ -1,123 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CatBoost + HGB 조합 앙상블 모델 제출 스크립트"""
+"""CatBoost + HGB 조합 앙상블 모델 제출 스크립트 (pickle.load 사용)"""
 
 import os
-import warnings
-import joblib
+import pickle
 import numpy as np
 import pandas as pd
 import sys
-import types
 
-# sklearn 버전 불일치 경고 무시
-warnings.filterwarnings("ignore", category=UserWarning)
-
-# =============================================================
-# 필요한 클래스 정의 (모델 로드 전에 정의 필요)
-# =============================================================
-
-class TemperatureScaler:
-    """바이너리 확률 Temperature Scaling"""
-    def __init__(self, init_T: float = 1.0):
-        self.T = float(init_T)
-
-    @staticmethod
-    def _logit(p: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-        p = np.clip(p, eps, 1.0 - eps)
-        return np.log(p) - np.log(1.0 - p)
-
-    @staticmethod
-    def _sigmoid(z: np.ndarray) -> np.ndarray:
-        return 1.0 / (1.0 + np.exp(-z))
-
-    def fit(self, y_true: np.ndarray, p_prob: np.ndarray) -> None:
-        y = y_true.astype(float)
-        z = self._logit(p_prob)
-        candidates = np.linspace(0.5, 5.0, 10)
-        best_T, best_nll = self.T, np.inf
-        for t in candidates:
-            p = self._sigmoid(z / t)
-            nll = -np.mean(y * np.log(np.clip(p, 1e-12, 1)) + (1 - y) * np.log(np.clip(1 - p, 1e-12, 1)))
-            if nll < best_nll:
-                best_nll, best_T = nll, float(t)
-        self.T = best_T
-
-    def transform(self, p_prob: np.ndarray) -> np.ndarray:
-        z = self._logit(p_prob)
-        p = self._sigmoid(z / max(self.T, 1e-6))
-        return np.clip(p, 1e-7, 1 - 1e-7)
-
-
-class AvgProbaEnsemble:
-    """3개의 다른 시드로 학습한 모델의 확률을 평균내는 앙상블"""
-    def __init__(self, models):
-        self.models = models
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        probs = [m.predict_proba(X) for m in self.models]
-        return np.mean(probs, axis=0)
-
-
-class CalibratedWithTemperature:
-    """온도 스케일링이 적용된 앙상블"""
-    def __init__(self, base_ensemble, temp_scaler):
-        self.base_ensemble = base_ensemble
-        self.temp_scaler = temp_scaler
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        p = self.base_ensemble.predict_proba(X)
-        if self.temp_scaler is None:
-            return p
-        p1 = p[:, 1]
-        p1_t = self.temp_scaler.transform(p1)
-        p0_t = 1.0 - p1_t
-        return np.stack([p0_t, p1_t], axis=1)
-
-
-class CatBoostEnsemble:
-    """CatBoost 3중 앙상블 모델 래퍼"""
-    def __init__(self, models, temp_scaler=None):
-        self.models = models
-        self.temp_scaler = temp_scaler
-    
-    def predict_proba(self, X):
-        """3개 모델의 예측 확률 평균"""
-        probs = [model.predict_proba(X)[:, 1] for model in self.models]
-        proba = np.mean(probs, axis=0)
-        proba = np.clip(proba, 1e-7, 1-1e-7)
-        
-        # 온도 스케일링 적용
-        if self.temp_scaler is not None:
-            proba = self.temp_scaler.transform(proba)
-        
-        return np.stack([1 - proba, proba], axis=1)
-
-
-class CombinedEnsemble:
-    """CatBoost + HGB 조합 앙상블"""
-    def __init__(self, catboost_ensemble, hgb_ensemble, catboost_weight=0.5):
-        self.catboost_ensemble = catboost_ensemble
-        self.hgb_ensemble = hgb_ensemble
-        self.catboost_weight = catboost_weight
-        self.hgb_weight = 1.0 - catboost_weight
-    
-    def predict_proba(self, X):
-        """두 모델의 예측 확률 가중 평균"""
-        catboost_proba = self.catboost_ensemble.predict_proba(X)[:, 1]
-        hgb_proba = self.hgb_ensemble.predict_proba(X)[:, 1]
-        
-        combined_proba = (
-            self.catboost_weight * catboost_proba +
-            self.hgb_weight * hgb_proba
-        )
-        combined_proba = np.clip(combined_proba, 1e-7, 1-1e-7)
-        
-        return np.stack([1 - combined_proba, combined_proba], axis=1)
-
+# numpy.random 모듈을 먼저 import (pickle 호환성을 위해)
+import numpy.random
+try:
+    import numpy.random._pickle
+    import numpy.random._pcg64
+except ImportError:
+    pass
 
 # =============================================================
-# Feature-engineering helpers (copied from training code)
+# 피처 엔지니어링 함수 (기존 코드에서 가져옴)
 # =============================================================
 
 def _seq_mean(series: pd.Series) -> pd.Series:
@@ -143,56 +43,66 @@ def _seq_rate(series: pd.Series, target: str = "1") -> pd.Series:
         denom = len(parts)
         if denom == 0:
             return np.nan
-        return parts.count(target) / denom
+        num = sum(1 for p in parts if p.strip() == target)
+        return num / denom
 
     return series.fillna("").apply(_count_rate)
 
 
 def _masked_mean_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_val: float) -> pd.Series:
-    cond_df = cond_series.fillna("").str.split(",", expand=True).replace("", np.nan)
-    val_df = val_series.fillna("").str.split(",", expand=True).replace("", np.nan)
-    try:
-        cond_arr = cond_df.to_numpy(dtype=float)
-    except Exception:
-        cond_arr = cond_df.apply(pd.to_numeric, errors="coerce").to_numpy()
-    try:
-        val_arr = val_df.to_numpy(dtype=float)
-    except Exception:
-        val_arr = val_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+    def _helper(row):
+        cond_str = str(row[0]) if pd.notna(row[0]) else ""
+        val_str = str(row[1]) if pd.notna(row[1]) else ""
+        if not cond_str or not val_str:
+            return np.nan
+        try:
+            conds = np.fromstring(cond_str, sep=",")
+            vals = np.fromstring(val_str, sep=",")
+            if len(conds) != len(vals):
+                return np.nan
+            masked = vals[conds == mask_val]
+            return masked.mean() if len(masked) > 0 else np.nan
+        except:
+            return np.nan
 
-    mask = (cond_arr == mask_val)
-    with np.errstate(invalid="ignore"):
-        sums = np.nansum(np.where(mask, val_arr, np.nan), axis=1)
-        counts = np.sum(mask, axis=1)
-        out = sums / np.where(counts == 0, np.nan, counts)
-    return pd.Series(out, index=cond_series.index)
+    df_tmp = pd.DataFrame({"cond": cond_series, "val": val_series})
+    return df_tmp.apply(_helper, axis=1)
 
 
-def _masked_mean_any_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_vals: list[float]) -> pd.Series:
-    cond_df = cond_series.fillna("").str.split(",", expand=True).replace("", np.nan)
-    val_df = val_series.fillna("").str.split(",", expand=True).replace("", np.nan)
-    try:
-        cond_arr = cond_df.to_numpy(dtype=float)
-    except Exception:
-        cond_arr = cond_df.apply(pd.to_numeric, errors="coerce").to_numpy()
-    try:
-        val_arr = val_df.to_numpy(dtype=float)
-    except Exception:
-        val_arr = val_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+def _masked_mean_any_from_csv_series(cond_series: pd.Series, val_series: pd.Series, mask_vals: list) -> pd.Series:
+    """여러 mask_val 중 하나라도 해당하는 값들의 평균"""
+    def _helper(row):
+        cond_str = str(row[0]) if pd.notna(row[0]) else ""
+        val_str = str(row[1]) if pd.notna(row[1]) else ""
+        if not cond_str or not val_str:
+            return np.nan
+        try:
+            conds = np.fromstring(cond_str, sep=",")
+            vals = np.fromstring(val_str, sep=",")
+            if len(conds) != len(vals):
+                return np.nan
+            mask = np.isin(conds, mask_vals)
+            masked = vals[mask]
+            return masked.mean() if len(masked) > 0 else np.nan
+        except:
+            return np.nan
 
-    mask = np.zeros_like(cond_arr, dtype=bool)
-    for mv in mask_vals:
-        with np.errstate(invalid="ignore"):
-            mask |= (cond_arr == mv)
-    with np.errstate(invalid="ignore"):
-        sums = np.nansum(np.where(mask, val_arr, np.nan), axis=1)
-        counts = np.sum(mask, axis=1)
-        out = sums / np.where(counts == 0, np.nan, counts)
-    return pd.Series(out, index=cond_series.index)
+    df_tmp = pd.DataFrame({"cond": cond_series, "val": val_series})
+    return df_tmp.apply(_helper, axis=1)
 
 
 def preprocess_A_v2(train_A: pd.DataFrame) -> pd.DataFrame:
+    """A 데이터 피처 엔지니어링(v2)"""
     df = train_A.copy()
+    df = df.dropna().reset_index(drop=True)
+
+    drop_cols = [
+        "A1-1", "A1-2",
+        "A3-1", "A3-2", "A3-3", "A3-4", "A3-5",
+        "A4-1", "A4-2", "A4-3",
+    ]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+
     feats = pd.DataFrame(index=df.index)
 
     if "A1-3" in df.columns:
@@ -242,7 +152,10 @@ def preprocess_A_v2(train_A: pd.DataFrame) -> pd.DataFrame:
 
 
 def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
+    """B 데이터 피처 엔지니어링(v2)"""
     df = train_B.copy()
+    df = df.dropna().reset_index(drop=True)
+
     feats = pd.DataFrame(index=df.index)
 
     if "B1-1" in df.columns:
@@ -270,40 +183,48 @@ def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
             feats[f"{k}_rt_mean"] = _seq_mean(df[rt_col])
             feats[f"{k}_rt_std"] = _seq_std(df[rt_col])
 
+    # B4 난이도: B4-1에서 1,2 < 3,4,5,6 (hard)
     if set(["B4-1", "B4-2"]).issubset(df.columns):
-        hard_mean = _masked_mean_any_from_csv_series(df["B4-1"], df["B4-2"], [3, 4, 5, 6])
-        easy_mean = _masked_mean_any_from_csv_series(df["B4-1"], df["B4-2"], [1, 2])
+        hard_mean = _masked_mean_any_from_csv_series(df["B4-1"], df["B4-2"], [3,4,5,6])
+        easy_mean = _masked_mean_any_from_csv_series(df["B4-1"], df["B4-2"], [1,2])
         feats["B4_rt_hard_mean"] = hard_mean
         feats["B4_rt_easy_mean"] = easy_mean
         feats["B4_rt_hard_minus_easy"] = hard_mean - easy_mean
+        # 정답이 1 vs 3/5 가정: 비율 비교(참고용)
         feats["B4_rate_ans1"] = _seq_rate(df["B4-1"], "1")
         feats["B4_rate_ans3"] = _seq_rate(df["B4-1"], "3")
         feats["B4_rate_ans5"] = _seq_rate(df["B4-1"], "5")
         feats["B4_rate_ans35"] = feats["B4_rate_ans3"].fillna(0.0) + feats["B4_rate_ans5"].fillna(0.0)
 
+    # ---- B6~B8 ----
     for k in ["B6", "B7", "B8"]:
         if k in df.columns:
             feats[f"{k}_acc_rate"] = _seq_rate(df[k], "1")
 
+    # B6 vs B7 난이도 차이: B7이 더 어려움 가정
     if set(["B6_acc_rate", "B7_acc_rate"]).issubset(feats.columns):
         feats["B76_acc_diff"] = feats["B7_acc_rate"] - feats["B6_acc_rate"]
 
-    b9_cols = [c for c in ["B9-1", "B9-2", "B9-3", "B9-4"] if c in df.columns]
-    if b9_cols:
-        feats["B9_g1to4_mean"] = df[b9_cols].mean(axis=1)
-        feats["B9_g1to4_std"] = df[b9_cols].std(axis=1)
+    # ---- B9/B10 그룹 ----
+    # B9: 1~4 한 묶음, 5 별도
+    b9_exist = [c for c in ["B9-1","B9-2","B9-3","B9-4"] if c in df.columns]
+    if b9_exist:
+        feats["B9_g1to4_mean"] = df[b9_exist].mean(axis=1)
+        feats["B9_g1to4_std"] = df[b9_exist].std(axis=1)
     if "B9-5" in df.columns:
         feats["B9_g5"] = df["B9-5"]
 
-    b10_1to4 = [c for c in ["B10-1", "B10-2", "B10-3", "B10-4"] if c in df.columns]
+    # B10: 1~4 한 묶음, 5~6 한 묶음 (B10이 B9보다 더 어려움)
+    b10_1to4 = [c for c in ["B10-1","B10-2","B10-3","B10-4"] if c in df.columns]
     if b10_1to4:
         feats["B10_g1to4_mean"] = df[b10_1to4].mean(axis=1)
         feats["B10_g1to4_std"] = df[b10_1to4].std(axis=1)
-    b10_5to6 = [c for c in ["B10-5", "B10-6"] if c in df.columns]
+    b10_5to6 = [c for c in ["B10-5","B10-6"] if c in df.columns]
     if b10_5to6:
         feats["B10_g5to6_mean"] = df[b10_5to6].mean(axis=1)
         feats["B10_g5to6_std"] = df[b10_5to6].std(axis=1)
 
+    # B10 vs B9 델타(난이도 차이 특징)
     if "B10_g1to4_mean" in feats.columns and "B9_g1to4_mean" in feats.columns:
         feats["B10minusB9_g1to4_mean"] = feats["B10_g1to4_mean"] - feats["B9_g1to4_mean"]
     if "B10_g1to4_std" in feats.columns and "B9_g1to4_std" in feats.columns:
@@ -314,7 +235,8 @@ def preprocess_B_v2(train_B: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def add_rowwise_features(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
+def add_rowwise_features(df: pd.DataFrame, feature_cols: list) -> pd.DataFrame:
+    """행 단위 피처 추가"""
     X = df[feature_cols]
     na_count = X.isna().sum(axis=1).astype(np.int32)
     na_ratio = (na_count / (len(feature_cols) + 1e-9)).astype(np.float32)
@@ -324,157 +246,178 @@ def add_rowwise_features(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFr
     return df2
 
 
-# =============================================================
-# Main inference pipeline
-# =============================================================
+def predict_with_bundle(bundle, feat_df: pd.DataFrame) -> np.ndarray:
+    """
+    bundle로부터 예측 수행
+    bundle 구조:
+    - preproc: 전처리기
+    - catboost_models: CatBoost 모델 리스트
+    - hgb_models: HGB 모델 리스트
+    - catboost_temperature: CatBoost temperature
+    - hgb_temperature: HGB temperature
+    - catboost_weight: CatBoost 가중치
+    - hgb_weight: HGB 가중치
+    """
+    preproc = bundle["preproc"]
+    catboost_models = bundle["catboost_models"]
+    hgb_models = bundle["hgb_models"]
+    cb_temp = bundle.get("catboost_temperature", 1.0)
+    hgb_temp = bundle.get("hgb_temperature", 1.0)
+    cb_weight = bundle.get("catboost_weight", 0.3)
+    hgb_weight = bundle.get("hgb_weight", 0.7)
+
+    # 전처리 적용
+    drop_cols = ["Test_id", "Label"]
+    drop_cols = [c for c in drop_cols if c in feat_df.columns]
+    feature_cols = [c for c in feat_df.columns if c not in drop_cols]
+    
+    # 행 단위 피처 추가
+    feat_df = add_rowwise_features(feat_df, feature_cols)
+    
+    X = feat_df.drop(columns=drop_cols, errors="ignore")
+    X_t = preproc.transform(X)
+    
+    n = len(X_t)
+
+    # CatBoost 예측
+    catboost_probs = []
+    for model in catboost_models:
+        prob = model.predict_proba(X_t)[:, 1]
+        catboost_probs.append(prob)
+    catboost_mean = np.mean(catboost_probs, axis=0)
+
+    # Temperature scaling for CatBoost
+    if cb_temp != 1.0:
+        # Temperature scaling: p' = sigmoid(logit(p) / T)
+        catboost_mean = np.clip(catboost_mean, 1e-7, 1 - 1e-7)
+        logits = np.log(catboost_mean / (1 - catboost_mean))
+        catboost_mean = 1.0 / (1.0 + np.exp(-logits / cb_temp))
+        catboost_mean = np.clip(catboost_mean, 1e-7, 1 - 1e-7)
+
+    # HGB 예측
+    hgb_probs = []
+    for model in hgb_models:
+        prob = model.predict_proba(X_t)[:, 1]
+        hgb_probs.append(prob)
+    hgb_mean = np.mean(hgb_probs, axis=0)
+
+    # Temperature scaling for HGB
+    if hgb_temp != 1.0:
+        hgb_mean = np.clip(hgb_mean, 1e-7, 1 - 1e-7)
+        logits = np.log(hgb_mean / (1 - hgb_mean))
+        hgb_mean = 1.0 / (1.0 + np.exp(-logits / hgb_temp))
+        hgb_mean = np.clip(hgb_mean, 1e-7, 1 - 1e-7)
+
+    # 가중 평균
+    blended = cb_weight * catboost_mean + hgb_weight * hgb_mean
+    blended = np.clip(blended, 1e-7, 1 - 1e-7)
+
+    return blended
+
+
+def load_bundle(path):
+    """bundle 로드 (pickle.load 사용)"""
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
 
 def main():
     os.makedirs("output", exist_ok=True)
 
-    # 테스트 데이터 로드
-    base = pd.read_csv(os.path.join("data", "test.csv"))
-    if "Test" not in base.columns:
-        raise ValueError("test.csv must contain 'Test' column")
+    # ------------------------------------------------
+    # 0. 모델 로드 (pickle.load 사용)
+    # ------------------------------------------------
+    model_dir = "model"
+    bundle_a_path = os.path.join(model_dir, "bundle_A.pkl")
+    bundle_b_path = os.path.join(model_dir, "bundle_B.pkl")
 
-    # Raw features
-    A_raw = pd.read_csv(os.path.join("data", "test", "A.csv"))
-    B_raw = pd.read_csv(os.path.join("data", "test", "B.csv"))
+    if not os.path.exists(bundle_a_path) or not os.path.exists(bundle_b_path):
+        raise FileNotFoundError("bundle_A.pkl 혹은 bundle_B.pkl 이 없습니다.")
 
-    # 피처 엔지니어링
-    A_feat = preprocess_A_v2(A_raw)
-    B_feat = preprocess_B_v2(B_raw)
+    bundle_a = load_bundle(bundle_a_path)
+    bundle_b = load_bundle(bundle_b_path)
 
-    # 모델 및 전처리기 로드
-    print("[로딩] CatBoost + HGB 조합 앙상블 모델 로드 중...")
-    
-    # 모델 로드 전에 필요한 클래스를 sys.modules에 등록
-    # src.model_utils 모듈을 가짜로 생성
-    fake_src = types.ModuleType('src')
-    fake_src_model_utils = types.ModuleType('src.model_utils')
-    fake_src_model_utils.TemperatureScaler = TemperatureScaler
-    fake_src_model_utils.AvgProbaEnsemble = AvgProbaEnsemble
-    fake_src_model_utils.CalibratedWithTemperature = CalibratedWithTemperature
-    fake_src.model_utils = fake_src_model_utils
-    sys.modules['src'] = fake_src
-    sys.modules['src.model_utils'] = fake_src_model_utils
-    
-    # __main__ 모듈에 클래스 등록
-    import __main__
-    __main__.CatBoostEnsemble = CatBoostEnsemble
-    __main__.CombinedEnsemble = CombinedEnsemble
-    __main__.TemperatureScaler = TemperatureScaler
-    __main__.AvgProbaEnsemble = AvgProbaEnsemble
-    __main__.CalibratedWithTemperature = CalibratedWithTemperature
-    
-    # numpy BitGenerator 호환성 처리 (PCG64 pickle 오류 방지)
-    # 평가 서버: numpy==1.26.4, 로컬: numpy 2.x 가능성
-    try:
-        import pickle
-        import numpy.random._pickle
-        
-        # PCG64 BitGenerator를 pickle에 등록
-        try:
-            from numpy.random import PCG64
-            # PCG64 클래스를 pickle에 등록
-            if hasattr(np.random._pickle, '_PCG64_unpickle'):
-                pickle.registry[PCG64] = np.random._pickle._PCG64_unpickle
-        except (ImportError, AttributeError):
-            pass
-        
-        # joblib의 numpy 호환성 처리
-        try:
-            import joblib.numpy_pickle
-            # joblib이 numpy를 올바르게 인식하도록
-            if hasattr(joblib.numpy_pickle, 'NumpyArrayWrapper'):
-                pass
-        except:
-            pass
-    except (ImportError, AttributeError):
-        # numpy.random._pickle이 없는 경우 (numpy 1.x)
-        pass
-    
-    ensemble_A = joblib.load(os.path.join("model", "model_A.pkl"))
-    preproc_A = joblib.load(os.path.join("model", "preproc_A.pkl"))
-    ensemble_B = joblib.load(os.path.join("model", "model_B.pkl"))
-    preproc_B = joblib.load(os.path.join("model", "preproc_B.pkl"))
+    # ------------------------------------------------
+    # 1. base test 로드 (A/B 구분용)
+    # ------------------------------------------------
+    base_test = pd.read_csv("data/test.csv")
+    if "Test" not in base_test.columns:
+        raise ValueError("data/test.csv 에 'Test' 컬럼이 없습니다. A/B 구분을 할 수 없습니다.")
 
-    drop_cols_A = ["Test_id", "Label"]
-    drop_cols_B = ["Test_id", "Label"]
+    # raw A/B
+    has_a_raw = os.path.exists("data/test/A.csv")
+    has_b_raw = os.path.exists("data/test/B.csv")
 
-    preds_list = []
-
-    # A 모델 예측
-    A_idx = base[base["Test"] == "A"].copy()
-    if len(A_idx):
-        print(f"[예측] A 모델 예측 중... (n={len(A_idx)})")
-        df = A_idx.merge(A_feat, on="Test_id", how="left", validate="1:1")
-        if 'Test_x' in df.columns or 'Test_y' in df.columns:
-            if 'Test_x' in df.columns:
-                df.rename(columns={'Test_x': 'Test'}, inplace=True)
-            df.drop(columns=[c for c in ['Test_y'] if c in df.columns], inplace=True, errors='ignore')
-        df = df.loc[:, ~df.columns.duplicated()]
-        
-        # 피처 준비
-        feature_cols = [c for c in df.columns if c not in drop_cols_A]
-        df = add_rowwise_features(df, feature_cols)
-        X = df.drop(columns=drop_cols_A, errors="ignore")
-        
-        # 전처리 및 예측
-        X_t = preproc_A.transform(X)
-        pred = ensemble_A.predict_proba(X_t)[:, 1]
-        preds_list.append(pd.DataFrame({"Test_id": df["Test_id"], "Label": pred}))
-
-    # B 모델 예측
-    B_idx = base[base["Test"] == "B"].copy()
-    if len(B_idx):
-        print(f"[예측] B 모델 예측 중... (n={len(B_idx)})")
-        df = B_idx.merge(B_feat, on="Test_id", how="left", validate="1:1")
-        if 'Test_x' in df.columns or 'Test_y' in df.columns:
-            if 'Test_x' in df.columns:
-                df.rename(columns={'Test_x': 'Test'}, inplace=True)
-            df.drop(columns=[c for c in ['Test_y'] if c in df.columns], inplace=True, errors='ignore')
-        df = df.loc[:, ~df.columns.duplicated()]
-        
-        # 피처 준비
-        feature_cols = [c for c in df.columns if c not in drop_cols_B]
-        df = add_rowwise_features(df, feature_cols)
-        X = df.drop(columns=drop_cols_B, errors="ignore")
-        
-        # 전처리 및 예측
-        X_t = preproc_B.transform(X)
-        pred = ensemble_B.predict_proba(X_t)[:, 1]
-        preds_list.append(pd.DataFrame({"Test_id": df["Test_id"], "Label": pred}))
-
-    # 결과 병합
-    if preds_list:
-        sub = pd.concat(preds_list, axis=0, ignore_index=True)
+    if has_a_raw:
+        a_raw = pd.read_csv("data/test/A.csv")
     else:
-        sub = pd.DataFrame({"Test_id": base["Test_id"], "Label": 0.5})
+        a_raw = None
 
-    # Sample submission과 병합 (컬럼 순서 맞추기)
-    try:
-        sample = pd.read_csv(os.path.join("data", "sample_submission.csv"))
-        sub = sample.merge(sub, on="Test_id", how="left", suffixes=("", "_pred"))
-        if "Label_pred" in sub.columns:
-            sub["Label"] = sub["Label_pred"]
-        elif "Label_y" in sub.columns:
-            sub["Label"] = sub["Label_y"]
-        elif "Label_x" in sub.columns and "Label" not in sub.columns:
-            sub.rename(columns={"Label_x": "Label"}, inplace=True)
-        if "Label" not in sub.columns:
-            sub["Label"] = 0.5
-        sub["Label"] = sub["Label"].astype(float).fillna(0.5)
-        sub = sub[["Test_id", "Label"]]
-    except Exception:
-        sub = sub[["Test_id", "Label"]]
+    if has_b_raw:
+        b_raw = pd.read_csv("data/test/B.csv")
+    else:
+        b_raw = None
 
-    # 결과 저장
-    sub.to_csv(os.path.join("output", "submission.csv"), index=False)
-    print(f"✅ output/submission.csv 저장 완료 (rows={len(sub)})")
-    print(f"   Label 범위: [{sub['Label'].min():.5f}, {sub['Label'].max():.5f}]")
-    print(f"   Label 평균: {sub['Label'].mean():.5f}")
+    # ------------------------------------------------
+    # 2. A 처리
+    # ------------------------------------------------
+    test_a_ids = base_test[base_test["Test"] == "A"]["Test_id"].tolist()
+
+    if a_raw is not None and len(test_a_ids) > 0:
+        a_raw = a_raw[a_raw["Test_id"].isin(test_a_ids)].reset_index(drop=True)
+        feat_a = preprocess_A_v2(a_raw)
+        # Test_id가 이미 있으면 유지, 없으면 추가
+        if "Test_id" not in feat_a.columns:
+            feat_a.insert(0, "Test_id", a_raw["Test_id"].values)
+        a_probs = predict_with_bundle(bundle_a, feat_a)
+        a_pred_df = pd.DataFrame({"Test_id": feat_a["Test_id"], "Label": a_probs})
+    else:
+        a_pred_df = pd.DataFrame(
+            {"Test_id": test_a_ids, "Label": np.full(len(test_a_ids), 0.5)}
+        )
+        print("[script] data/test/A.csv 없음 → A는 0.5로 채웠습니다.")
+
+    # ------------------------------------------------
+    # 3. B 처리
+    # ------------------------------------------------
+    test_b_ids = base_test[base_test["Test"] == "B"]["Test_id"].tolist()
+
+    if b_raw is not None and len(test_b_ids) > 0:
+        b_raw = b_raw[b_raw["Test_id"].isin(test_b_ids)].reset_index(drop=True)
+        feat_b = preprocess_B_v2(b_raw)
+        # Test_id가 이미 있으면 유지, 없으면 추가
+        if "Test_id" not in feat_b.columns:
+            feat_b.insert(0, "Test_id", b_raw["Test_id"].values)
+        b_probs = predict_with_bundle(bundle_b, feat_b)
+        b_pred_df = pd.DataFrame({"Test_id": feat_b["Test_id"], "Label": b_probs})
+    else:
+        b_pred_df = pd.DataFrame(
+            {"Test_id": test_b_ids, "Label": np.full(len(test_b_ids), 0.5)}
+        )
+        print("[script] data/test/B.csv 없음 → B는 0.5로 채웠습니다.")
+
+    # ------------------------------------------------
+    # 4. 합치기 + base_test 순서로 정렬
+    # ------------------------------------------------
+    sub = pd.concat([a_pred_df, b_pred_df], axis=0, ignore_index=True)
+
+    # base_test에만 있고 sub에 없는 경우 0.5로 채우기
+    missing_ids = set(base_test["Test_id"]) - set(sub["Test_id"])
+    if missing_ids:
+        extra = pd.DataFrame({"Test_id": list(missing_ids), "Label": 0.5})
+        sub = pd.concat([sub, extra], axis=0, ignore_index=True)
+
+    sub = sub.set_index("Test_id").loc[base_test["Test_id"]].reset_index()
+
+    # ------------------------------------------------
+    # 5. 저장
+    # ------------------------------------------------
+    sub.to_csv("output/submission.csv", index=False)
+    print("[script] output/submission.csv 생성 완료")
+    print(f"  총 {len(sub)}개 행")
+    print(f"  Label 범위: [{sub['Label'].min():.5f}, {sub['Label'].max():.5f}]")
+    print(f"  Label 평균: {sub['Label'].mean():.5f}")
 
 
 if __name__ == "__main__":
     main()
-

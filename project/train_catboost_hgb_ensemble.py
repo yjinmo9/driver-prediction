@@ -175,8 +175,8 @@ def train_hgb_model(
     X_tr, y_tr, X_val, y_val,
     hgb_params,
     which="",
-    use_temperature=True,
-    use_calibration=True
+    use_temperature=False,  # 최적 조합: Temperature 없음
+    use_calibration=False   # 최적 조합: 캘리브레이션 없음
 ):
     """HGB 3중 앙상블 모델 학습 및 평가"""
     print(f"[{which}] HGB 3중 앙상블 학습 시작...")
@@ -191,7 +191,7 @@ def train_hgb_model(
         base = HistGradientBoostingClassifier(**params)
         base.fit(X_tr, y_tr)
         
-        # 캘리브레이션 적용
+        # 캘리브레이션 적용 (최적 조합: 사용 안 함)
         if use_calibration:
             calib = create_calibrated_model(base)
             calib.fit(X_tr, y_tr)
@@ -204,7 +204,7 @@ def train_hgb_model(
     val_proba_raw = ensemble.predict_proba(X_val)[:, 1]
     val_proba_raw = np.clip(val_proba_raw, 1e-7, 1-1e-7)
     
-    # 온도 스케일링
+    # 온도 스케일링 (최적 조합: 사용 안 함)
     temp_scaler = None
     if use_temperature:
         temp_scaler = TemperatureScaler()
@@ -272,27 +272,134 @@ def prepare_data(train_idx, train_feat, test_type):
 def save_model_artifacts(
     preproc_A, combined_ensemble_A,
     preproc_B, combined_ensemble_B,
+    feature_cols_A=None,
+    feature_cols_B=None,
 ):
-    """A/B 모델 및 전처리기 저장"""
+    """A/B 모델 및 전처리기를 bundle 형태로 저장 (pickle.dump 사용)"""
+    import pickle
+    
     os.makedirs(os.path.dirname(A_MODEL_FILE), exist_ok=True)
     
-    # A/B 각각 저장
-    joblib.dump(combined_ensemble_A, A_MODEL_FILE)
-    joblib.dump(preproc_A, A_PREPROC_FILE)
-    joblib.dump(combined_ensemble_B, B_MODEL_FILE)
-    joblib.dump(preproc_B, B_PREPROC_FILE)
+    # A bundle 생성
+    # CombinedEnsemble에서 CatBoost와 HGB 앙상블 추출
+    catboost_ensemble_A = combined_ensemble_A.catboost_ensemble
+    hgb_ensemble_A = combined_ensemble_A.hgb_ensemble
+    
+    # CatBoost temperature 추출
+    cb_temp_A = 1.0
+    if hasattr(catboost_ensemble_A, 'temp_scaler') and catboost_ensemble_A.temp_scaler is not None:
+        cb_temp_A = float(catboost_ensemble_A.temp_scaler.T)
+    
+    # HGB temperature 추출
+    hgb_temp_A = 1.0
+    if hasattr(hgb_ensemble_A, 'temp_scaler') and hgb_ensemble_A.temp_scaler is not None:
+        hgb_temp_A = float(hgb_ensemble_A.temp_scaler.T)
+    elif hasattr(hgb_ensemble_A, 'base_ensemble'):
+        # CalibratedWithTemperature인 경우
+        if hasattr(hgb_ensemble_A, 'temp_scaler') and hgb_ensemble_A.temp_scaler is not None:
+            hgb_temp_A = float(hgb_ensemble_A.temp_scaler.T)
+    
+    # CatBoost 모델 리스트 추출
+    cb_models_A = catboost_ensemble_A.models
+    
+    # HGB 모델 리스트 추출
+    if hasattr(hgb_ensemble_A, 'base_ensemble'):
+        # CalibratedWithTemperature인 경우
+        hgb_models_A = hgb_ensemble_A.base_ensemble.models
+    elif hasattr(hgb_ensemble_A, 'models'):
+        # AvgProbaEnsemble인 경우
+        hgb_models_A = hgb_ensemble_A.models
+    else:
+        hgb_models_A = []
+    
+    # feature_cols 추출 (전처리기에 저장된 컬럼 정보 사용)
+    if feature_cols_A is None:
+        try:
+            # ColumnTransformer에서 컬럼 정보 추출
+            if hasattr(preproc_A, 'feature_names_in_'):
+                feature_cols_A = list(preproc_A.feature_names_in_)
+            else:
+                feature_cols_A = None
+        except:
+            feature_cols_A = None
+    
+    bundle_A = {
+        "preproc": preproc_A,
+        "catboost_models": cb_models_A,
+        "hgb_models": hgb_models_A,
+        "catboost_temperature": cb_temp_A,
+        "hgb_temperature": hgb_temp_A,
+        "catboost_weight": combined_ensemble_A.catboost_weight,
+        "hgb_weight": combined_ensemble_A.hgb_weight,
+        "feature_cols": feature_cols_A,  # 나중에 사용할 수 있도록
+    }
+    
+    with open(os.path.join(MODEL_DIR, "bundle_A.pkl"), "wb") as f:
+        pickle.dump(bundle_A, f)
+    
+    # B bundle 생성
+    catboost_ensemble_B = combined_ensemble_B.catboost_ensemble
+    hgb_ensemble_B = combined_ensemble_B.hgb_ensemble
+    
+    # CatBoost temperature 추출
+    cb_temp_B = 1.0
+    if hasattr(catboost_ensemble_B, 'temp_scaler') and catboost_ensemble_B.temp_scaler is not None:
+        cb_temp_B = float(catboost_ensemble_B.temp_scaler.T)
+    
+    # HGB temperature 추출
+    # HGB는 CalibratedWithTemperature로 감싸져 있음
+    hgb_temp_B = 1.0
+    if hasattr(hgb_ensemble_B, 'temp_scaler'):
+        if hgb_ensemble_B.temp_scaler is not None:
+            hgb_temp_B = float(hgb_ensemble_B.temp_scaler.T)
+    
+    # CatBoost 모델 리스트 추출
+    cb_models_B = catboost_ensemble_B.models
+    
+    # HGB 모델 리스트 추출
+    if hasattr(hgb_ensemble_B, 'base_ensemble'):
+        hgb_models_B = hgb_ensemble_B.base_ensemble.models
+    elif hasattr(hgb_ensemble_B, 'models'):
+        hgb_models_B = hgb_ensemble_B.models
+    else:
+        hgb_models_B = []
+    
+    # feature_cols 추출 (전처리기에 저장된 컬럼 정보 사용)
+    if feature_cols_B is None:
+        try:
+            # ColumnTransformer에서 컬럼 정보 추출
+            if hasattr(preproc_B, 'feature_names_in_'):
+                feature_cols_B = list(preproc_B.feature_names_in_)
+        except:
+            feature_cols_B = None
+    
+    # B bundle 저장
+    bundle_B = {
+        "preproc": preproc_B,
+        "catboost_models": cb_models_B,
+        "hgb_models": hgb_models_B,
+        "catboost_temperature": cb_temp_B,
+        "hgb_temperature": hgb_temp_B,
+        "catboost_weight": combined_ensemble_B.catboost_weight,
+        "hgb_weight": combined_ensemble_B.hgb_weight,
+        "feature_cols": feature_cols_B,  # 피처 컬럼 목록
+    }
+    
+    with open(os.path.join(MODEL_DIR, "bundle_B.pkl"), "wb") as f:
+        pickle.dump(bundle_B, f)
     
     # 메타데이터 저장
     meta = {
         "model": "CatBoost + HGB 조합 앙상블",
-        "A_catboost_params": {
-            "learning_rate": 0.065,
-            "iterations": 900,
-            "depth": 5,
-            "l2_leaf_reg": 0.4,
-            "min_data_in_leaf": 25,
-            "name": "A-CatBoost-7: 얕고 빠른",
+        "catboost_params": {
+            "learning_rate": 0.06,
+            "iterations": 1000,
+            "depth": 8,
+            "l2_leaf_reg": 0.5,
+            "min_data_in_leaf": 20,
+            "name": "더 공격적 (A/B 동일)",
         },
+        "catboost_use_temperature": True,
         "A_hgb_params": {
             "learning_rate": 0.05,
             "max_iter": 1200,
@@ -300,15 +407,7 @@ def save_model_artifacts(
             "min_samples_leaf": 30,
             "l2_regularization": 0.6,
             "class_weight": None,
-            "name": "A-HGB 더_공격적_3 (Final: 0.16381)",
-        },
-        "B_catboost_params": {
-            "learning_rate": 0.06,
-            "iterations": 1000,
-            "depth": 8,
-            "l2_leaf_reg": 0.5,
-            "min_data_in_leaf": 20,
-            "name": "B-CatBoost-4: 더 공격적",
+            "name": "A-HGB 더_공격적_3",
         },
         "B_hgb_params": {
             "learning_rate": 0.05,
@@ -317,12 +416,13 @@ def save_model_artifacts(
             "min_samples_leaf": 30,
             "l2_regularization": 0.7,
             "class_weight": None,
-            "name": "B-HGB 더_공격적_3 (Final: 0.21703)",
+            "name": "B-HGB 더_공격적_3",
         },
+        "hgb_use_calibration": False,
+        "hgb_use_temperature": False,
         "ensemble_seeds": list(ENSEMBLE_SEEDS),
-        "use_temperature_scaling": True,
-        "catboost_weight": 0.5,
-        "hgb_weight": 0.5,
+        "catboost_weight": 0.3,
+        "hgb_weight": 0.7,
     }
     with open(META_FILE, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -331,8 +431,11 @@ def save_model_artifacts(
 def main():
     print("="*60)
     print("CatBoost + HGB 조합 앙상블 최종 모델 학습")
-    print("A: CatBoost-7 + HGB 더_공격적_3")
-    print("B: CatBoost-4 + HGB 더_공격적_3")
+    print("최적 설정:")
+    print("  - CatBoost: 더 공격적 (A/B 동일)")
+    print("  - HGB: 더_공격적_3 (캘리브레이션 없음, Temperature 없음)")
+    print("  - CatBoost: Temperature 있음")
+    print("  - 가중치: CatBoost 0.3, HGB 0.7")
     print("="*60)
     
     # 디렉터리 준비
@@ -348,22 +451,8 @@ def main():
     B_train_feat = preprocess_B_v2(B_train_feat)
     
     # ========== CatBoost 파라미터 ==========
-    # A 모델: CatBoost-7 (얕고 빠른)
-    catboost_params_A = {
-        "learning_rate": 0.065,
-        "iterations": 900,
-        "depth": 5,
-        "l2_leaf_reg": 0.4,
-        "min_data_in_leaf": 25,
-        "bootstrap_type": "Bayesian",
-        "bagging_temperature": 1.0,
-        "random_strength": 1.0,
-        "border_count": 254,
-        "early_stopping_rounds": 50,
-    }
-    
-    # B 모델: CatBoost-4 (더 공격적)
-    catboost_params_B = {
+    # 최적 조합: 더 공격적 (현재 B) - A/B 모두 동일 파라미터 사용
+    catboost_params = {
         "learning_rate": 0.06,
         "iterations": 1000,
         "depth": 8,
@@ -375,6 +464,10 @@ def main():
         "border_count": 254,
         "early_stopping_rounds": 50,
     }
+    
+    # A/B 모두 동일한 CatBoost 파라미터 사용
+    catboost_params_A = catboost_params
+    catboost_params_B = catboost_params
     
     # ========== HGB 파라미터 ==========
     # A 모델: 더_공격적_3 파라미터 (Final: 0.16381, AUC: 0.68410)
@@ -414,6 +507,10 @@ def main():
         train_idx, B_train_feat, "B"
     )
     
+    # 가중치 고정: CatBoost 0.3, HGB 0.7 (최적 조합)
+    CATBOOST_WEIGHT = 0.3
+    HGB_WEIGHT = 0.7
+    
     # A 모델 학습 (CatBoost + HGB 병렬)
     print("\n[학습 시작] A 모델 학습 중...")
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -422,27 +519,19 @@ def main():
             X_A_tr, y_A_tr, X_A_val, y_A_val,
             catboost_params_A,
             "A-CatBoost",
+            use_temperature=True,  # CatBoost: Temperature 있음
         )
         future_hgb_A = executor.submit(
             train_hgb_model,
             X_A_tr, y_A_tr, X_A_val, y_A_val,
             hgb_params_A,
             "A-HGB",
+            use_temperature=False,  # HGB: Temperature 없음
+            use_calibration=False,  # HGB: 캘리브레이션 없음
         )
         
         catboost_ensemble_A, _, catboost_proba_A = future_cb_A.result()
         hgb_ensemble_A, _, hgb_proba_A = future_hgb_A.result()
-    
-    # A 조합 앙상블 생성 및 평가
-    print("\n[A] 조합 앙상블 테스트...")
-    combined_ensemble_A = CombinedEnsemble(catboost_ensemble_A, hgb_ensemble_A, catboost_weight=0.5)
-    combined_proba_A = combined_ensemble_A.predict_proba(X_A_val)[:, 1]
-    
-    auc_A = roc_auc_score(y_A_val, combined_proba_A)
-    brier_A = brier_score_loss(y_A_val, combined_proba_A)
-    ece_A = compute_ece(y_A_val, combined_proba_A, n_bins=15)
-    final_A = compute_final_score(auc_A, brier_A, ece_A)
-    print(f"[A] 조합 Holdout AUC={auc_A:.5f}, Brier={brier_A:.5f}, ECE={ece_A:.5f}, Final={final_A:.5f}")
     
     # B 모델 학습 (CatBoost + HGB 병렬)
     print("\n[학습 시작] B 모델 학습 중...")
@@ -452,20 +541,33 @@ def main():
             X_B_tr, y_B_tr, X_B_val, y_B_val,
             catboost_params_B,
             "B-CatBoost",
+            use_temperature=True,  # CatBoost: Temperature 있음
         )
         future_hgb_B = executor.submit(
             train_hgb_model,
             X_B_tr, y_B_tr, X_B_val, y_B_val,
             hgb_params_B,
             "B-HGB",
+            use_temperature=False,  # HGB: Temperature 없음
+            use_calibration=False,  # HGB: 캘리브레이션 없음
         )
         
         catboost_ensemble_B, _, catboost_proba_B = future_cb_B.result()
         hgb_ensemble_B, _, hgb_proba_B = future_hgb_B.result()
     
-    # B 조합 앙상블 생성 및 평가
-    print("\n[B] 조합 앙상블 테스트...")
-    combined_ensemble_B = CombinedEnsemble(catboost_ensemble_B, hgb_ensemble_B, catboost_weight=0.5)
+    # 조합 앙상블 생성 및 평가
+    print("\n[A] 조합 앙상블 테스트... (가중치: CatBoost 0.3, HGB 0.7)")
+    combined_ensemble_A = CombinedEnsemble(catboost_ensemble_A, hgb_ensemble_A, catboost_weight=CATBOOST_WEIGHT)
+    combined_proba_A = combined_ensemble_A.predict_proba(X_A_val)[:, 1]
+    
+    auc_A = roc_auc_score(y_A_val, combined_proba_A)
+    brier_A = brier_score_loss(y_A_val, combined_proba_A)
+    ece_A = compute_ece(y_A_val, combined_proba_A, n_bins=15)
+    final_A = compute_final_score(auc_A, brier_A, ece_A)
+    print(f"[A] 조합 Holdout AUC={auc_A:.5f}, Brier={brier_A:.5f}, ECE={ece_A:.5f}, Final={final_A:.5f}")
+    
+    print("\n[B] 조합 앙상블 테스트... (가중치: CatBoost 0.3, HGB 0.7)")
+    combined_ensemble_B = CombinedEnsemble(catboost_ensemble_B, hgb_ensemble_B, catboost_weight=CATBOOST_WEIGHT)
     combined_proba_B = combined_ensemble_B.predict_proba(X_B_val)[:, 1]
     
     auc_B = roc_auc_score(y_B_val, combined_proba_B)
